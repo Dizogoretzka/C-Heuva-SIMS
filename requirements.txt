@@ -2,7 +2,6 @@ Django>=5.2,<6.2
 dj-database-url>=2.3,<4
 gunicorn>=23,<24
 psycopg2-binary>=2.9.10,<3
-whitenoise>=6.9,<7
 Pillow>=11,<13
 requests>=2.32,<3
 reportlab>=4.4,<5

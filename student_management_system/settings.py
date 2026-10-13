@@ -74,9 +74,6 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 
-    # Third Part Middleware
-    'whitenoise.middleware.WhiteNoiseMiddleware',
-
     # My Middleware
     'main_app.middleware.LoginCheckMiddleWare',
 ]
@@ -184,11 +181,7 @@ STORAGES = {
         'BACKEND': 'django.core.files.storage.FileSystemStorage',
     },
     'staticfiles': {
-        'BACKEND': (
-            'django.contrib.staticfiles.storage.StaticFilesStorage'
-            if DEBUG
-            else 'whitenoise.storage.CompressedManifestStaticFilesStorage'
-        ),
+        'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
     },
 }
 
