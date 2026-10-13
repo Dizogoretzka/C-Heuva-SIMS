@@ -1,0 +1,97 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block custom_css %}
+<style>
+    .result-table a:not(.btn) {
+        text-decoration: none;
+        color: #464feb;
+    }
+    .result-table tr th,
+    .result-table tr td {
+        border: 1px solid #e6e6e6;
+    }
+    .result-table tr th {
+        background-color: #f5f5f5;
+    }
+</style>
+{% endblock custom_css %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card card-primary">
+            <div class="card-header">
+                <h3 class="card-title">Add Learner Result</h3>
+            </div>
+            <form method="post">
+                {% csrf_token %}
+                <div class="card-body">
+                    {% for field in form %}
+                        <div class="form-group">
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                            {{ field }}
+                            {% for error in field.errors %}
+                                <div class="text-danger">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                    {% endfor %}
+                </div>
+                <div class="card-footer">
+                    <button type="submit" class="btn btn-primary">Add Result</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Recorded Learner Results</h3>
+            </div>
+            <div class="card-body table-responsive">
+                {% include "main_app/search_bar.html" with search_target="manage-results-list" search_placeholder="Search results..." %}
+                <table id="manage-results-list" class="table table-bordered table-hover result-table">
+                    <thead>
+                        <tr>
+                            <th>Learner</th>
+                            <th>Subject</th>
+                            <th>Test / CA</th>
+                            <th>Exam</th>
+                            <th>Total</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for result in results %}
+                            <tr data-search-item>
+                                <td>{{ result.student.admin.get_full_name }}</td>
+                                <td>{{ result.subject.name }}</td>
+                                <td>{{ result.test }}</td>
+                                <td>{{ result.exam }}</td>
+                                <td>{{ result.total_score }}</td>
+                                <td class="text-nowrap">
+                                    <a class="btn btn-sm btn-primary"
+                                       href="{% url 'edit_student_result' result.id %}">Edit</a>
+                                    <form method="post"
+                                          action="{% url 'delete_student_result' result.id %}"
+                                          class="d-inline"
+                                          onsubmit="return confirm('Delete this result?');">
+                                        {% csrf_token %}
+                                        <button class="btn btn-sm btn-danger" type="submit">Delete</button>
+                                    </form>
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr data-search-item>
+                                <td colspan="6" class="text-center text-muted">
+                                    No learner results have been recorded yet.
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                <div class="alert alert-light d-none" data-search-empty-for="#manage-results-list">
+                    No results match your search.
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

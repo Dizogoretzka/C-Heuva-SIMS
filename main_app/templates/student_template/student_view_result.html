@@ -1,0 +1,68 @@
+{% extends 'main_app/base.html' %}
+{% load static %}
+{% block page_title %}{{page_title}}{% endblock page_title %}
+{% block custom_css %}
+<style>
+    .result-table a:not(.btn) {
+        text-decoration: none;
+        color: #464feb;
+    }
+    .result-table tr th,
+    .result-table tr td {
+        border: 1px solid #e6e6e6;
+    }
+    .result-table tr th {
+        background-color: #f5f5f5;
+    }
+</style>
+{% endblock custom_css %}
+
+{% block content %}
+
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-12">
+                <!-- general form elements -->
+       
+                <!-- /.card -->
+<div class="card card-primary">
+    <div class="card-header"><h3 class="card-title">{{page_title}}</h3>
+    </div>
+   <div class="table p-2">
+
+       {% include "main_app/search_bar.html" with search_target="learner-results-list" search_placeholder="Search results..." %}
+       <table id="learner-results-list" class="table table-bordered table-hover result-table">
+           <tr>
+               <th>ID</th>
+               <th>Subject</th>
+               <th>Test</th>
+               <th>Exam</th>
+               <th>Total</th>
+        </tr>
+        {% for result in results %}
+        <tr data-search-item>
+            <td>{{forloop.counter}}</td>
+            <td>{{ result.subject }}</td>
+            <td>{{ result.test }}</td>
+            <td>{{ result.exam }}</td>
+            <td>{{ result.total_score }}</td>
+            </tr>
+        {% empty %}
+        <tr data-search-item>
+            <td colspan="5" class="text-center text-muted">
+                No results have been recorded for your account yet.
+            </td>
+        </tr>
+        {% endfor %}
+        </table>
+        <div class="alert alert-light d-none" data-search-empty-for="#learner-results-list">
+            No results match your search.
+        </div>
+    </div>
+    </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

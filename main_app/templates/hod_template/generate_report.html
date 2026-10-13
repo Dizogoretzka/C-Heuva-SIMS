@@ -1,0 +1,76 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-8">
+                <div class="card card-primary">
+                    <div class="card-header">
+                        <h3 class="card-title">Create a printable school report</h3>
+                    </div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <div class="card-body">
+                            {% if form.non_field_errors %}
+                                <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+                            {% endif %}
+                            <div class="form-group">
+                                <label for="{{ form.report_type.id_for_label }}">{{ form.report_type.label }}</label>
+                                {{ form.report_type }}
+                                {{ form.report_type.errors }}
+                            </div>
+                            <div class="form-group report-filter" id="course-field">
+                                <label for="{{ form.course.id_for_label }}">{{ form.course.label }}</label>
+                                {{ form.course }}
+                                {{ form.course.errors }}
+                            </div>
+                            <div class="form-group report-filter" id="session-field">
+                                <label for="{{ form.session.id_for_label }}">{{ form.session.label }}</label>
+                                {{ form.session }}
+                                {{ form.session.errors }}
+                            </div>
+                            <div class="form-group report-filter" id="subject-field">
+                                <label for="{{ form.subject.id_for_label }}">{{ form.subject.label }} (optional)</label>
+                                {{ form.subject }}
+                                {{ form.subject.errors }}
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-file-pdf mr-1"></i> Generate PDF
+                            </button>
+                        </div>
+                    </form>
+                </div>
+                <p class="text-muted">
+                    School Summary includes all available records. Other reports
+                    require a course/grade and session/term. Learner Results can
+                    optionally be filtered to one subject.
+                </p>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}
+{% block custom_js %}
+<script>
+    (function () {
+        const reportType = document.getElementById("id_report_type");
+        const courseField = document.getElementById("course-field");
+        const sessionField = document.getElementById("session-field");
+        const subjectField = document.getElementById("subject-field");
+
+        function updateFilters() {
+            const selectedType = reportType.value;
+            const schoolSummary = selectedType === "school_summary";
+            courseField.hidden = schoolSummary;
+            sessionField.hidden = schoolSummary;
+            subjectField.hidden = selectedType !== "learner_results";
+        }
+
+        reportType.addEventListener("change", updateFilters);
+        updateFilters();
+    })();
+</script>
+{% endblock custom_js %}

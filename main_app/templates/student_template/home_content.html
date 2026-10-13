@@ -1,0 +1,67 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-lg-4 col-6">
+                <div class="small-box bg-info">
+                    <div class="inner">
+                        <h3>{{ total_subject }}</h3>
+                        <p>Total Subjects</p>
+                    </div>
+                    <div class="icon">
+                        <i class="fas fa-book"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}
+{% block custom_js %}
+<script src="https://www.gstatic.com/firebasejs/7.23.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/7.22.1/firebase-messaging.js"></script>
+<script>
+    firebase.initializeApp({
+        apiKey: "AIzaSyBarDWWHTfTMSrtc5Lj3Cdw5dEvjAkFwtM",
+        authDomain: "sms-with-django.firebaseapp.com",
+        databaseURL: "https://sms-with-django.firebaseio.com",
+        projectId: "sms-with-django",
+        storageBucket: "sms-with-django.appspot.com",
+        messagingSenderId: "945324593139",
+        appId: "1:945324593139:web:03fa99a8854bbd38420c86",
+        measurementId: "G-2F2RXTL9GT"
+    });
+    const messaging = firebase.messaging();
+    function sendToServer(token) {
+        $.ajax({
+            url: "{% url 'student_fcmtoken' %}",
+            type: "POST",
+            data: { token: token }
+        });
+    }
+    messaging.requestPermission()
+        .then(function () { return messaging.getToken(); })
+        .then(sendToServer)
+        .catch(function (reason) { console.log(reason); });
+    messaging.onTokenRefresh(function () {
+        messaging.getToken()
+            .then(sendToServer)
+            .catch(function (reason) { console.log(reason); });
+    });
+    messaging.onMessage(function (payload) {
+        if (Notification.permission === "granted") {
+            const notification = new Notification(payload.notification.title, {
+                body: payload.notification.body,
+                icon: payload.notification.icon
+            });
+            notification.onclick = function (event) {
+                event.preventDefault();
+                window.open(payload.notification.click_action, "_blank");
+                notification.close();
+            };
+        }
+    });
+</script>
+{% endblock custom_js %}

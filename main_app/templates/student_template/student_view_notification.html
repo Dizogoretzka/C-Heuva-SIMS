@@ -1,0 +1,56 @@
+{% extends 'main_app/base.html' %}
+{% load static %}
+{% block page_title %}{{page_title}}{% endblock page_title %}
+{% block content %}
+
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-12">
+                <!-- general form elements -->
+                <div class="card card-primary">
+                    <div class="card-header">
+                        <h3 class="card-title">{{page_title}}</h3>
+                    </div>
+
+
+                    <!-- /.card-header -->
+                    <!-- form start -->
+                    <div class="card-body">
+
+
+
+                       
+
+
+                        <div class="form-group table">
+              {% include "main_app/search_bar.html" with search_target="learner-notifications-list" search_placeholder="Search notifications..." %}
+              <table id="learner-notifications-list" class="table table-bordered">
+                  <tr>
+                      <th>SN</th>
+                      <th>Date</th>
+                      <th>Message</th>
+                  </tr>
+                  {% for notification in  notifications %}
+                    <tr data-search-item>
+                        <td>{{forloop.counter}}</td>
+                        <td>{{notification.created_at}}</td>
+                        <td>{{notification.message}}</td>
+                    </tr>
+                  {% endfor %}
+              </table>
+              <div class="alert alert-light d-none" data-search-empty-for="#learner-notifications-list">
+                  No notifications match your search.
+              </div>
+                        </div>
+                   
+                    </div>
+                    <!-- /.card-body -->
+
+                <!-- /.card -->
+
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

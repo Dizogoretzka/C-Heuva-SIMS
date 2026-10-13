@@ -1,0 +1,42 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Subjects provided by your administrator</h3>
+                    </div>
+                    <div class="card-body">
+                        {% include "main_app/search_bar.html" with search_target="learner-subject-list" search_placeholder="Search subjects..." %}
+                        {% if subjects %}
+                            <ul id="learner-subject-list" class="list-group">
+                                {% for subject in subjects %}
+                                    <li class="list-group-item" data-search-item>
+                                        <i class="fas fa-book text-primary mr-2"></i>
+                                        {{ subject.name }}
+                                    </li>
+                                {% endfor %}
+                            </ul>
+                            <div class="alert alert-light d-none mt-3" data-search-empty-for="#learner-subject-list">
+                                No subjects match your search.
+                            </div>
+                        {% else %}
+                            <ul id="learner-subject-list" class="list-group"></ul>
+                            <div class="alert alert-light d-none mt-3" data-search-empty-for="#learner-subject-list">
+                                No subjects match your search.
+                            </div>
+                            <p class="text-muted mb-0">
+                                No subjects have been added by the administrator yet.
+                                Please contact an administrator.
+                            </p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}
