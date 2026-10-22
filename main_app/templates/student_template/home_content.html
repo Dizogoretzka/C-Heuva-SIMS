@@ -15,6 +15,40 @@
                     </div>
                 </div>
             </div>
+            <div class="col-lg-4 col-6">
+                <div class="small-box bg-primary">
+                    <div class="inner">
+                        <h3>{{ student_result_count }}</h3>
+                        <p>My Results</p>
+                    </div>
+                    <div class="icon">
+                        <i class="fas fa-chart-bar"></i>
+                    </div>
+                    <a href="{% url 'student_view_result' %}" class="small-box-footer">
+                        View grades and results <i class="fas fa-arrow-circle-right"></i>
+                    </a>
+                </div>
+            </div>
+            <div class="col-lg-4 col-6">
+                <div class="small-box {% if report_card_available %}bg-success{% else %}bg-secondary{% endif %}">
+                    <div class="inner">
+                        <h3><i class="fas fa-file-pdf"></i></h3>
+                        <p>My Report Card</p>
+                    </div>
+                    <div class="icon">
+                        <i class="fas fa-download"></i>
+                    </div>
+                    {% if report_card_available %}
+                    <a href="{% url 'student_report_card' %}" class="small-box-footer">
+                        Download report card <i class="fas fa-arrow-circle-right"></i>
+                    </a>
+                    {% else %}
+                    <div class="small-box-footer">
+                        Available after a session / term and results are assigned.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
         </div>
     </div>
 </section>

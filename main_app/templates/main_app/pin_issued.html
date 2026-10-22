@@ -1,0 +1,26 @@
+{% load static %}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ selected_role|title }} PIN</title>
+    {% include "main_app/favicon_links.html" %}
+    <link rel="stylesheet" href="{% static 'dist/css/adminlte.min.css' %}">
+    <link rel="stylesheet" href="{% static 'main_app/css/branding.css' %}">
+</head>
+<body class="hold-transition login-page">
+    <div class="login-box">
+        <div class="card">
+            <div class="card-body login-card-body text-center">
+                {% include "main_app/crest_logo.html" with crest_class="auth-crest" %}
+                <h2>{{ pin_title }}</h2>
+                <p>Copy this one-time PIN and hand it securely to the account holder.</p>
+                <p class="h1" aria-label="One-time PIN">{{ issued_pin }}</p>
+                <p>This PIN will not be shown again. Store it securely and do not share it in a message or URL.</p>
+                <a class="btn btn-primary" href="{{ return_url }}">{{ return_label }}</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -120,23 +120,23 @@ DATABASES = {
 
 # Password validation
 # https://docs.djangoproject.com/en/3.1/ref/settings/#auth-password-validators
-if not DEBUG:
-    AUTH_PASSWORD_VALIDATORS = []
-else:
-    AUTH_PASSWORD_VALIDATORS = [
-        {
-            'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
-        },
-        {
-            'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-        },
-        {
-            'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-        },
-        {
-            'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
-        },
-    ]
+AUTH_PASSWORD_VALIDATORS = [
+    {
+        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+    },
+    {
+        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+    },
+]
+
+ADMIN_REGISTRATION_CODE = os.environ.get('ADMIN_REGISTRATION_CODE', '')
+TEACHER_REGISTRATION_CODE = os.environ.get('TEACHER_REGISTRATION_CODE', '')
 
 
 # Internationalization
@@ -161,20 +161,20 @@ MEDIA_URL = '/media/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'static')
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 AUTH_USER_MODEL = 'main_app.CustomUser'
-AUTHENTICATION_BACKENDS = ['main_app.EmailBackend.EmailBackend']
+AUTHENTICATION_BACKENDS = ['main_app.UsernameBackend.UsernameBackend']
+SIMS_ALLOW_EMAIL_SIGNIN = os.environ.get(
+    'SIMS_ALLOW_EMAIL_SIGNIN', 'True').lower() in {'true', '1', 'yes'}
+SIMS_PIN_ENFORCED = os.environ.get(
+    'SIMS_PIN_ENFORCED', 'False').lower() in {'true', '1', 'yes'}
+SIMS_LOGIN_MAX_FAILED_ATTEMPTS = int(
+    os.environ.get('SIMS_LOGIN_MAX_FAILED_ATTEMPTS', '5'))
+SIMS_LOGIN_LOCKOUT_MINUTES = int(
+    os.environ.get('SIMS_LOGIN_LOCKOUT_MINUTES', '15'))
+SIMS_LOGIN_IP_MAX_FAILURES = int(
+    os.environ.get('SIMS_LOGIN_IP_MAX_FAILURES', '20'))
+SIMS_LOGIN_IP_WINDOW_SECONDS = int(
+    os.environ.get('SIMS_LOGIN_IP_WINDOW_SECONDS', '900'))
 TIME_ZONE = 'Africa/Lagos'
-
-# EMAIL_BACKEND = 'django.core.mail.backends.filebased.EmailBackend'
-# EMAIL_FILE_PATH = os.path.join(BASE_DIR, "sent_mails")
-
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-
-EMAIL_HOST_USER = os.environ.get('EMAIL_ADDRESS') 
-EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_PASSWORD')
-EMAIL_USE_TLS = True
-# DEFAULT_FROM_EMAIL = "School Information Management System <admin@admin.com>"
 
 STORAGES = {
     'default': {

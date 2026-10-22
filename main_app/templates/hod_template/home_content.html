@@ -28,9 +28,105 @@
                         <i class="fas fa-book"></i>
                     </div>
                     <a href="{% url 'manage_subject' %}" class="small-box-footer">
-                        Manage subjects <i class="fas fa-arrow-circle-right"></i>
+                        {% if is_teacher %}View subjects{% else %}Manage subjects{% endif %}
+                        <i class="fas fa-arrow-circle-right"></i>
                     </a>
                 </div>
+            </div>
+            {% if not is_teacher %}
+            <div class="col-lg-4 col-6">
+                <div class="small-box bg-success">
+                    <div class="inner">
+                        <h3>{{ learners_logged_in_today }}</h3>
+                        <p>Learners Logged In Today</p>
+                    </div>
+                    <div class="icon">
+                        <i class="fas fa-sign-in-alt"></i>
+                    </div>
+                    <a href="{% url 'learner_login_activity' %}" class="small-box-footer">
+                        View login activity <i class="fas fa-arrow-circle-right"></i>
+                    </a>
+                </div>
+            </div>
+            {% else %}
+            <div class="col-lg-4 col-6">
+                <div class="small-box bg-success">
+                    <div class="inner">
+                        <h3>Results</h3>
+                        <p>Enter and update learner marks</p>
+                    </div>
+                    <div class="icon"><i class="fas fa-chart-bar"></i></div>
+                    <a href="{% url 'manage_student_results' %}" class="small-box-footer">
+                        Manage results <i class="fas fa-arrow-circle-right"></i>
+                    </a>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% if is_teacher %}
+        <div class="row">
+            <div class="col-lg-6 col-12">
+                <div class="info-box">
+                    <span class="info-box-icon bg-warning"><i class="fas fa-award"></i></span>
+                    <div class="info-box-content">
+                        <span class="info-box-text">Grade Bands</span>
+                        <span class="info-box-number">Configure result grades</span>
+                        <a href="{% url 'manage_grade_bands' %}">Manage grade bands</a>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6 col-12">
+                <div class="info-box">
+                    <span class="info-box-icon bg-primary"><i class="fas fa-file-alt"></i></span>
+                    <div class="info-box-content">
+                        <span class="info-box-text">Attendance</span>
+                        <span class="info-box-number">Take or correct class attendance</span>
+                        <a href="{% url 'teacher_attendance' %}">Open attendance</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-12">
+                <a class="btn btn-primary mr-2" href="{% url 'generate_report_card' %}">Generate report card</a>
+                <a class="btn btn-outline-primary" href="{% url 'generate_report' %}">Generate class, results, or attendance report</a>
+            </div>
+        </div>
+        {% else %}
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Last 5 Learner Logins</h3>
+                    </div>
+                    <div class="card-body table-responsive p-0">
+                        <table class="table table-hover text-nowrap">
+                            <thead>
+                                <tr>
+                                    <th>Learner</th>
+                                    <th>Username</th>
+                                    <th>Course / grade</th>
+                                    <th>Date and time</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for activity in recent_logins %}
+                                <tr>
+                                    <td>{{ activity.student.admin.get_full_name|default:activity.student.admin.username }}</td>
+                                    <td>{{ activity.student.admin.username }}</td>
+                                    <td>{{ activity.student.course|default:"Not assigned" }}</td>
+                                    <td>{{ activity.logged_in_at|date:"M j, Y, P" }}</td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="4" class="text-center">No learner logins recorded yet.</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {% endif %}
             </div>
         </div>
     </div>

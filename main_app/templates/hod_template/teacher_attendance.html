@@ -1,0 +1,68 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card card-primary">
+            <div class="card-header"><h3 class="card-title">Select class and date</h3></div>
+            <form method="get">
+                <div class="card-body">
+                    {% for field in form %}
+                    <div class="form-group">
+                        {{ field.label_tag }}{{ field }}
+                        {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                    </div>
+                    {% endfor %}
+                    {% if form.non_field_errors %}<div class="text-danger">{{ form.non_field_errors }}</div>{% endif %}
+                </div>
+                <div class="card-footer"><button class="btn btn-primary" type="submit">Load Learners</button></div>
+            </form>
+        </div>
+        {% if selection_loaded %}
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">
+                    {{ selection_details.course }} — {{ selection_details.subject }} —
+                    {{ selection_details.session }} — {{ selection_details.date }}
+                </h3>
+            </div>
+            {% if form.non_field_errors %}<div class="card-body text-danger">{{ form.non_field_errors }}</div>{% endif %}
+            {% if roster %}
+            <form method="post">
+                {% csrf_token %}
+                {% for field in form %}
+                <input type="hidden" name="{{ field.html_name }}" value="{{ field.value|default_if_none:'' }}">
+                {% endfor %}
+                <div class="card-body table-responsive">
+                    <table class="table table-bordered table-hover">
+                        <thead><tr><th>Learner</th><th>Username</th><th>Attendance</th></tr></thead>
+                        <tbody>
+                            {% for learner in roster %}
+                            <tr>
+                                <td>{{ learner.admin.get_full_name }}</td>
+                                <td>{{ learner.admin.username }}</td>
+                                <td>
+                                    <select class="form-control" name="attendance_{{ learner.pk }}" required>
+                                        <option value="">Select status</option>
+                                        <option value="present" {% if learner.attendance_choice == 'present' %}selected{% endif %}>Present</option>
+                                        <option value="absent" {% if learner.attendance_choice == 'absent' %}selected{% endif %}>Absent</option>
+                                    </select>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="card-footer">
+                    <button type="submit" class="btn btn-success">Save Attendance</button>
+                    {% if attendance %}<span class="ml-2 text-muted">Existing attendance loaded; saving will update it.</span>{% endif %}
+                </div>
+            </form>
+            {% else %}
+            <div class="card-body">There are no learners assigned to this course/grade and session/term.</div>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock content %}

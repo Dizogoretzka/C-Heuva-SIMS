@@ -1,0 +1,92 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Filter login activity</h3>
+            </div>
+            <form method="get">
+                <div class="card-body">
+                    {% if filter_form.non_field_errors %}
+                    <div class="alert alert-danger">{{ filter_form.non_field_errors }}</div>
+                    {% endif %}
+                    <div class="row">
+                        <div class="col-md-4 form-group">
+                            <label for="{{ filter_form.learner.id_for_label }}">{{ filter_form.learner.label }}</label>
+                            {{ filter_form.learner }}
+                            {{ filter_form.learner.errors }}
+                        </div>
+                        <div class="col-md-4 form-group">
+                            <label for="{{ filter_form.date.id_for_label }}">{{ filter_form.date.label }}</label>
+                            {{ filter_form.date }}
+                            {{ filter_form.date.errors }}
+                        </div>
+                        <div class="col-md-4 form-group">
+                            <label for="{{ filter_form.course.id_for_label }}">{{ filter_form.course.label }}</label>
+                            {{ filter_form.course }}
+                            {{ filter_form.course.errors }}
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <button type="submit" class="btn btn-primary">Apply filters</button>
+                    <a href="{% url 'learner_login_activity' %}" class="btn btn-default">Clear</a>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Recent learner logins</h3>
+            </div>
+            <div class="card-body table-responsive p-0">
+                <table class="table table-hover text-nowrap">
+                    <thead>
+                        <tr>
+                            <th>Learner</th>
+                            <th>Username</th>
+                            <th>Course / grade</th>
+                            <th>Date and time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for activity in page_obj %}
+                        <tr>
+                            <td>{{ activity.student.admin.get_full_name|default:activity.student.admin.username }}</td>
+                            <td>{{ activity.student.admin.username }}</td>
+                            <td>{{ activity.student.course|default:"Not assigned" }}</td>
+                            <td>{{ activity.logged_in_at|date:"M j, Y, P" }}</td>
+                        </tr>
+                        {% empty %}
+                        <tr>
+                            <td colspan="4" class="text-center">No login activity matches these filters.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if page_obj.has_other_pages %}
+            <div class="card-footer clearfix">
+                <ul class="pagination pagination-sm m-0 float-right">
+                    {% if page_obj.has_previous %}
+                    <li class="page-item">
+                        <a class="page-link" href="?{% if query_params %}{{ query_params }}&amp;{% endif %}page={{ page_obj.previous_page_number }}">Previous</a>
+                    </li>
+                    {% endif %}
+                    <li class="page-item disabled">
+                        <span class="page-link">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+                    </li>
+                    {% if page_obj.has_next %}
+                    <li class="page-item">
+                        <a class="page-link" href="?{% if query_params %}{{ query_params }}&amp;{% endif %}page={{ page_obj.next_page_number }}">Next</a>
+                    </li>
+                    {% endif %}
+                </ul>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endblock content %}

@@ -7,25 +7,95 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <title>C. Heuva Junior Secondary School Information System</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% include "main_app/favicon_links.html" %}
     <link rel="stylesheet" href="{% static 'plugins/fontawesome-free/css/all.min.css' %}">
     <link rel="stylesheet" href="{% static 'plugins/icheck-bootstrap/icheck-bootstrap.min.css' %}">
     <link rel="stylesheet" href="{% static 'dist/css/adminlte.min.css' %}">
+    <link rel="stylesheet" href="{% static 'main_app/css/branding.css' %}">
+    <style>
+        body.login-page {
+            min-height: 100vh;
+            padding: 2rem 1rem;
+        }
+
+        .role-picker {
+            width: min(100%, 960px);
+        }
+
+        .role-picker .login-logo {
+            white-space: normal;
+        }
+
+        .role-picker .card-body {
+            padding: 1.5rem;
+        }
+
+        .role-options {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 1.25rem;
+        }
+
+        .role-option {
+            min-height: 190px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.85rem;
+            padding: 1.25rem;
+            border-radius: 0.5rem;
+            font-size: 1.2rem;
+            font-weight: 600;
+            box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.12);
+            transition: transform 150ms ease, box-shadow 150ms ease;
+        }
+
+        .role-option:hover,
+        .role-option:focus {
+            transform: translateY(-3px);
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.18);
+        }
+
+        .role-option i {
+            font-size: 2.5rem;
+        }
+
+        @media (max-width: 575.98px) {
+            .role-options {
+                grid-template-columns: 1fr;
+            }
+
+            .role-option {
+                min-height: 125px;
+            }
+        }
+    </style>
 </head>
 
 <body class="hold-transition login-page">
-    <div class="login-box">
+    <div class="role-picker">
         <div class="login-logo">
+            {% include "main_app/crest_logo.html" with crest_class="landing-crest" crest_width="120" crest_height="133" %}
             <b>C. Heuva Junior Secondary School Information System</b>
         </div>
         <div class="card">
             <div class="card-body login-card-body">
                 <p class="login-box-msg">Choose how you want to continue</p>
-                <a href="{% url 'role_login' 'admin' %}" class="btn btn-primary btn-block mb-3">
-                    Admin
-                </a>
-                <a href="{% url 'role_login' 'learner' %}" class="btn btn-success btn-block">
-                    Learner
-                </a>
+                <div class="role-options">
+                    <a href="{% url 'role_login' 'admin' %}" class="btn btn-primary role-option">
+                        <i class="fas fa-user-shield" aria-hidden="true"></i>
+                        <span>Administrator</span>
+                    </a>
+                    <a href="{% url 'role_login' 'teacher' %}" class="btn btn-info role-option">
+                        <i class="fas fa-chalkboard-teacher" aria-hidden="true"></i>
+                        <span>Teacher</span>
+                    </a>
+                    <a href="{% url 'role_login' 'learner' %}" class="btn btn-success role-option">
+                        <i class="fas fa-user-graduate" aria-hidden="true"></i>
+                        <span>Learner</span>
+                    </a>
+                </div>
             </div>
         </div>
     </div>

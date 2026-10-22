@@ -1,0 +1,87 @@
+.school-crest {
+    display: flex;
+    justify-content: center;
+    margin: 0 auto 0.75rem;
+}
+
+.school-crest img {
+    display: block;
+    width: auto;
+    height: 88px;
+    max-width: 100%;
+    object-fit: contain;
+}
+
+.landing-crest img {
+    height: 132px;
+}
+
+.role-picker .login-logo {
+    margin-bottom: 0.75rem;
+}
+
+.auth-crest {
+    margin-bottom: 0.5rem;
+}
+
+.auth-crest img {
+    height: 86px;
+}
+
+.brand-link {
+    display: flex;
+    align-items: center;
+    min-height: 3.5rem;
+    overflow: hidden;
+}
+
+.brand-link .brand-image {
+    float: none;
+    flex: 0 0 auto;
+    width: auto;
+    height: 38px;
+    max-width: 42px;
+    margin: 0 0.6rem 0 0.25rem;
+    object-fit: contain;
+    opacity: 1;
+}
+
+.brand-link .brand-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+body.sidebar-collapse .brand-link .brand-text {
+    display: none;
+}
+
+body.sidebar-collapse .brand-link {
+    justify-content: center;
+    padding-left: 0.25rem;
+    padding-right: 0.25rem;
+}
+
+body.sidebar-collapse .brand-link .brand-image {
+    margin: 0;
+}
+
+@media (max-width: 575.98px) {
+    .landing-crest img {
+        height: 96px;
+    }
+
+    .auth-crest img {
+        height: 80px;
+    }
+
+    .brand-link .brand-image {
+        height: 32px;
+        max-width: 36px;
+        margin-right: 0.4rem;
+    }
+
+    .brand-link .brand-text {
+        font-size: 0.9rem;
+    }
+}

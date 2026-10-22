@@ -20,7 +20,7 @@
                                 <tr>
                                     <th>SN</th>
                                     <th>Full Name</th>
-                                    <th>Email</th>
+                                    <th>Username</th>
                                     <th>Gender</th>
                                     <th>Avatar</th>
                                     <th>Action</th>
@@ -31,7 +31,7 @@
                                 <tr data-search-item>
                                     <td>{{ forloop.counter }}</td>
                                     <td>{{student.last_name}}, {{student.first_name}}</td>
-                                    <td>{{student.email}}</td>
+                                    <td>{{student.username}}</td>
                                     <td>{{student.gender}}</td>
                                     <td>
                                         {% if student.profile_pic == ""  %}

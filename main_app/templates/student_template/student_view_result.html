@@ -38,7 +38,7 @@
                <th>Subject</th>
                <th>Test</th>
                <th>Exam</th>
-               <th>Total</th>
+               <th>Total / Grade</th>
         </tr>
         {% for result in results %}
         <tr data-search-item>
@@ -46,7 +46,7 @@
             <td>{{ result.subject }}</td>
             <td>{{ result.test }}</td>
             <td>{{ result.exam }}</td>
-            <td>{{ result.total_score }}</td>
+            <td>{{ result.total_score }} ({{ result.grade_symbol }})</td>
             </tr>
         {% empty %}
         <tr data-search-item>
@@ -56,6 +56,11 @@
         </tr>
         {% endfor %}
         </table>
+        {% if has_report_card %}
+        <a class="btn btn-primary mb-3" href="{% url 'student_report_card' %}">
+            <i class="fas fa-file-pdf mr-1"></i> Download report card
+        </a>
+        {% endif %}
         <div class="alert alert-light d-none" data-search-empty-for="#learner-results-list">
             No results match your search.
         </div>

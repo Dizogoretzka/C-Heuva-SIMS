@@ -54,7 +54,7 @@
                             <th>Subject</th>
                             <th>Test / CA</th>
                             <th>Exam</th>
-                            <th>Total</th>
+                            <th>Total / Grade</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -65,7 +65,7 @@
                                 <td>{{ result.subject.name }}</td>
                                 <td>{{ result.test }}</td>
                                 <td>{{ result.exam }}</td>
-                                <td>{{ result.total_score }}</td>
+                                <td>{{ result.total_score }} ({{ result.grade_symbol }})</td>
                                 <td class="text-nowrap">
                                     <a class="btn btn-sm btn-primary"
                                        href="{% url 'edit_student_result' result.id %}">Edit</a>

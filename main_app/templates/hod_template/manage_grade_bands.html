@@ -1,0 +1,78 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        {% if gaps %}
+        <div class="alert alert-warning">
+            <strong>Score range gaps:</strong>
+            {% for lower, upper in gaps %}
+            <span>{{ lower }} to {{ upper }}{% if not forloop.last %}; {% endif %}</span>
+            {% endfor %}
+            . Results in these gaps will display as Not graded.
+        </div>
+        {% endif %}
+        <div class="card card-primary">
+            <div class="card-header"><h3 class="card-title">Add Grade Band</h3></div>
+            <form method="post">
+                {% csrf_token %}
+                <div class="card-body">
+                    {% for error in form.non_field_errors %}
+                    <div class="text-danger">{{ error }}</div>
+                    {% endfor %}
+                    {% for field in form %}
+                    <div class="form-group">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                        {% for error in field.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                        {% endfor %}
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="card-footer">
+                    <button type="submit" class="btn btn-primary">Add Grade Band</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Configured Grade Bands</h3></div>
+            <div class="card-body table-responsive">
+                <table class="table table-bordered table-hover">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Minimum</th>
+                            <th>Maximum</th>
+                            <th>Description</th>
+                            <th>Report-card remark</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for band in bands %}
+                        <tr>
+                            <td>{{ band.symbol }}</td>
+                            <td>{{ band.minimum_score }}</td>
+                            <td>{{ band.maximum_score }}</td>
+                            <td>{{ band.description }}</td>
+                            <td>{{ band.remark|default:"—" }}</td>
+                            <td class="text-nowrap">
+                                <a class="btn btn-sm btn-primary" href="{% url 'edit_grade_band' band.id %}">Edit</a>
+                                <form method="post" action="{% url 'delete_grade_band' band.id %}" class="d-inline" onsubmit="return confirm('Delete this grade band?');">
+                                    {% csrf_token %}
+                                    <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="6" class="text-center text-muted">No grade bands have been configured.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

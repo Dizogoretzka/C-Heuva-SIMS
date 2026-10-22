@@ -1,0 +1,60 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-4">
+                <div class="info-box">
+                    <span class="info-box-icon bg-info"><i class="fas fa-calendar-check"></i></span>
+                    <div class="info-box-content">
+                        <span class="info-box-text">Attendance percentage</span>
+                        <span class="info-box-number">{{ attendance_percentage|floatformat:1 }}%</span>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="info-box">
+                    <span class="info-box-icon bg-success"><i class="fas fa-check"></i></span>
+                    <div class="info-box-content">
+                        <span class="info-box-text">Present</span>
+                        <span class="info-box-number">{{ present_count }}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="info-box">
+                    <span class="info-box-icon bg-secondary"><i class="fas fa-list"></i></span>
+                    <div class="info-box-content">
+                        <span class="info-box-text">Marked sessions</span>
+                        <span class="info-box-number">{{ total_marked }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">My Attendance Records</h3></div>
+            <div class="card-body table-responsive">
+                <table class="table table-bordered table-hover">
+                    <thead>
+                        <tr><th>Date</th><th>Course / grade</th><th>Subject</th><th>Session / term</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for record in records %}
+                        <tr>
+                            <td>{{ record.attendance.date }}</td>
+                            <td>{{ record.attendance.course }}</td>
+                            <td>{{ record.attendance.subject }}</td>
+                            <td>{{ record.attendance.session }}</td>
+                            <td>{% if record.status %}<span class="badge badge-success">Present</span>{% else %}<span class="badge badge-danger">Absent</span>{% endif %}</td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="5" class="text-center">No attendance records have been entered for you.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

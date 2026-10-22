@@ -1,0 +1,7 @@
+{% load static %}
+<div class="school-crest {{ crest_class }}">
+    <img src="{% static 'main_app/img/crest-logo.png' %}"
+         width="{{ crest_width|default:'96' }}"
+         height="{{ crest_height|default:'106' }}"
+         alt="C. Heuva school crest">
+</div>

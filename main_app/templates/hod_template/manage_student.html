@@ -26,7 +26,7 @@
                                 <tr>
                                     <th>SN</th>
                                     <th>Full Name</th>
-                                    <th>Email</th>
+                                    <th>Username</th>
                                     <th>Gender</th>
                                     <th>Avatar</th>
                                     <th>Edit</th>
@@ -37,7 +37,7 @@
                                 <tr data-search-item>
                                     <td>{{ forloop.counter }}</td>
                                     <td>{{student.last_name}}, {{student.first_name}}</td>
-                                    <td>{{student.email}}</td>
+                                    <td>{{student.username}}</td>
                                     <td>{{student.gender}}</td>
                                     <td>
                                         {% if student.profile_pic == ""  %}
@@ -50,6 +50,7 @@
                                     
                                     <td><a href="{% url 'edit_student' student.student.id %}" class="btn btn-primary">Edit</a> -
                                         <a href="{% url 'delete_student' student.student.id %}" class="btn btn-danger" onclick="return confirm('Are you sure about this ?')">Delete</a>
+                                        <a href="{% url 'reset_user_credentials' student.id %}" class="btn btn-secondary">Set password / Reset PIN</a>
 
                                     </td>
                                 </tr>

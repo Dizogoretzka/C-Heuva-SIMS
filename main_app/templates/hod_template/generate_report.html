@@ -7,7 +7,7 @@
             <div class="col-md-8">
                 <div class="card card-primary">
                     <div class="card-header">
-                        <h3 class="card-title">Create a printable school report</h3>
+                        <h3 class="card-title">                        Create a printable report</h3>
                     </div>
                     <form method="post">
                         {% csrf_token %}
@@ -44,9 +44,9 @@
                     </form>
                 </div>
                 <p class="text-muted">
-                    School Summary includes all available records. Other reports
-                    require a course/grade and session/term. Learner Results can
-                    optionally be filtered to one subject.
+                    Choose a course/grade and session/term for class, results,
+                    or attendance reports. Results and attendance can optionally
+                    be filtered to one subject.
                 </p>
             </div>
         </div>
@@ -66,7 +66,7 @@
             const schoolSummary = selectedType === "school_summary";
             courseField.hidden = schoolSummary;
             sessionField.hidden = schoolSummary;
-            subjectField.hidden = selectedType !== "learner_results";
+            subjectField.hidden = !["learner_results", "attendance_summary"].includes(selectedType);
         }
 
         reportType.addEventListener("change", updateFilters);

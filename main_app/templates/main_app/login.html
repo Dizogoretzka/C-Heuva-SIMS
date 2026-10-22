@@ -8,14 +8,16 @@
     <title>{{ selected_role|title }} Login</title>
     <!-- Tell the browser to be responsive to screen width -->
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% include "main_app/favicon_links.html" %}
     <!-- Font Awesome -->
     <link rel="stylesheet" href="{% static 'plugins/fontawesome-free/css/all.min.css' %}">
     <!-- Ionicons -->
-    <link rel="stylesheet" href="{% static 'https://code.ionicframework.com/ionicons/2.0.1/css/ionicons.min.css' %}">
+    <link rel="stylesheet" href="https://code.ionicframework.com/ionicons/2.0.1/css/ionicons.min.css">
     <!-- icheck bootstrap -->
     <link rel="stylesheet" href="{% static 'plugins/icheck-bootstrap/icheck-bootstrap.min.css' %}">
     <!-- Theme style -->
     <link rel="stylesheet" href="{% static 'dist/css/adminlte.min.css' %}">
+    <link rel="stylesheet" href="{% static 'main_app/css/branding.css' %}">
     <!-- Google Font: Source Sans Pro -->
     <link href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700" rel="stylesheet">
 </head>
@@ -23,6 +25,7 @@
 <body class="hold-transition login-page">
     <div class="login-box">
         <div class="login-logo">
+            {% include "main_app/crest_logo.html" with crest_class="auth-crest" %}
             <a href="{% url 'login_page' %}"><b>{{ selected_role|title }}</b> Login</a>
 
         </div>
@@ -33,11 +36,9 @@
                 {% if messages %}
                 <div class="col-12">
                     {% for message in messages %}
-                    {% if message.tags == 'error' %}
-                    <div class="alert alert-danger text-center ">
+                    <div class="alert {% if message.tags == 'success' %}alert-success{% else %}alert-danger{% endif %} text-center">
                         {{message }}
                     </div>
-                    {% endif %}
                     {% endfor %}
                 </div>
                 {% endif %}
@@ -45,10 +46,10 @@
                     {% csrf_token %}
                     <input type="hidden" name="role" value="{{ selected_role }}">
                     <div class="input-group mb-3">
-                        <input required type="email" name='email' class="form-control" placeholder="Email">
+                        <input required type="text" name='username' class="form-control" placeholder="Username" autocomplete="username">
                         <div class="input-group-append">
                             <div class="input-group-text">
-                                <span class="fas fa-envelope"></span>
+                                <span class="fas fa-user"></span>
                             </div>
                         </div>
                     </div>
@@ -57,6 +58,16 @@
                         <div class="input-group-append">
                             <div class="input-group-text">
                                 <span class="fas fa-lock"></span>
+                            </div>
+                        </div>
+                        <div class="input-group mb-3">
+                            <input type="password" name="pin" class="form-control"
+                                   placeholder="5-digit PIN" inputmode="numeric"
+                                   pattern="[0-9]{5}" maxlength="5" autocomplete="off">
+                            <div class="input-group-append">
+                                <div class="input-group-text">
+                                    <span class="fas fa-key"></span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -79,9 +90,10 @@
                     </div>
                 </form>
 
+                <p class="text-muted">Forgot your password or PIN? Ask your teacher or administrator to reset it.</p>
 
-                <p class="mb-1">
-                    <a href="{% url 'password_reset' %}">I forgot my password</a>
+                <p class="mb-0">
+                    <a href="{% url 'register_role' selected_role %}">Don't have an account? Register</a>
                 </p>
                 <p class="mb-0">
                     <a href="{% url 'login_page' %}">Choose a different interface</a>

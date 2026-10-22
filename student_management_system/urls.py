@@ -13,13 +13,54 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.http import Http404
 from django.contrib import admin
-from django.urls import path, include
+from django.conf import settings as django_settings
+from django.urls import include, path, re_path
 from django.conf.urls.static import static
+from django.views.generic.base import RedirectView
+from django.contrib.staticfiles.views import serve as serve_static
 from . import settings
 
+
+def unavailable_admin_password_change(request):
+    raise Http404
+
+
+def serve_static_asset(request, path):
+    if not django_settings.DEBUG:
+        raise Http404
+    return serve_static(request, path, insecure=True)
+
+
 urlpatterns = [
+    path(
+        'favicon.ico',
+        RedirectView.as_view(
+            url=f'{settings.STATIC_URL.rstrip("/")}/main_app/img/favicon.ico',
+            permanent=True,
+        ),
+        name='favicon',
+    ),
+    path(
+        'admin/password_change/done/',
+        unavailable_admin_password_change,
+    ),
+    path(
+        'admin/password_change/',
+        unavailable_admin_password_change,
+    ),
     path("", include('main_app.urls')),
-    path("accounts/", include("django.contrib.auth.urls")),
     path('admin/', admin.site.urls),
-] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT) + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+]
+
+urlpatterns.append(re_path(
+    r'^static/(?P<path>.*)$',
+    serve_static_asset,
+    name='static_asset',
+))
+
+urlpatterns += (
+    static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    + static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+)
