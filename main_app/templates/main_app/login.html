@@ -65,14 +65,16 @@
                     </div>
                     {% else %}
                     <div class="input-group mb-3">
-                        <input required type="password" name="pin" class="form-control"
+                        <input id="staff-pin" required type="password" name="pin" class="form-control"
                                placeholder="{{ pin_length }}-digit PIN" inputmode="numeric"
                                pattern="[0-9]+" maxlength="{{ pin_length }}"
                                autocomplete="off">
                         <div class="input-group-append">
-                            <div class="input-group-text">
-                                <span class="fas fa-key"></span>
-                            </div>
+                            <button class="btn btn-outline-secondary" type="button"
+                                    data-toggle-pin aria-controls="staff-pin"
+                                    aria-label="Show PIN">
+                                <span class="fas fa-eye" aria-hidden="true"></span>
+                            </button>
                         </div>
                     </div>
                     {% endif %}
@@ -101,10 +103,10 @@
                 <p class="mb-0">
                     <a href="{% url 'register_learner' %}">Don't have an account? Register</a>
                 </p>
+                {% endif %}
                 <p class="mb-0">
                     <a href="{% url 'login_page' %}">Choose a different interface</a>
                 </p>
-                {% endif %}
 
             </div>
             <!-- /.login-card-body -->
@@ -118,6 +120,18 @@
     <script src="{% static 'plugins/bootstrap/js/bootstrap.bundle.min.js' %}"></script>
     <!-- AdminLTE App -->
     <script src="{% static 'dist/js/adminlte.min.js' %}"></script>
+    <script>
+        document.querySelectorAll('[data-toggle-pin]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                var pin = document.getElementById(button.getAttribute('aria-controls'));
+                var showPin = pin.type === 'password';
+                pin.type = showPin ? 'text' : 'password';
+                button.setAttribute('aria-label', showPin ? 'Hide PIN' : 'Show PIN');
+                button.querySelector('span').classList.toggle('fa-eye', !showPin);
+                button.querySelector('span').classList.toggle('fa-eye-slash', showPin);
+            });
+        });
+    </script>
 
 </body>
 

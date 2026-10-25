@@ -235,9 +235,15 @@ class InterfaceSelectionTests(TestCase):
                 if role == 'learner':
                     self.assertContains(response, 'name=\'password\'')
                     self.assertNotContains(response, 'name="pin"')
+                    self.assertContains(
+                        response, "Don't have an account? Register")
+                    self.assertContains(response, 'Choose a different interface')
                 else:
                     self.assertContains(response, 'name="pin"')
                     self.assertNotContains(response, 'name=\'password\'')
+                    self.assertContains(response, 'Choose a different interface')
+                    self.assertContains(response, 'data-toggle-pin')
+                    self.assertContains(response, 'aria-label="Show PIN"')
 
     def test_learner_can_sign_in_through_learner_interface(self):
         learner = CustomUser.objects.create_user(
