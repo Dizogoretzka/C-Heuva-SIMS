@@ -3,16 +3,13 @@ from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 
 from .forms import AttendanceSelectionForm, ProfileUpdateForm
-from .models import (
-    Attendance,
-    AttendanceReport,
-    Student,
-    Subject,
-)
+from .models import Attendance, AttendanceReport, Student, Subject
+from .scoping import visible_students, visible_subjects
 from .views import render_pin_confirmation, update_profile_from_form
 
 
@@ -20,8 +17,8 @@ from .views import render_pin_confirmation, update_profile_from_form
 def teacher_home(request):
     return render(request, 'hod_template/home_content.html', {
         'page_title': 'Teacher Dashboard',
-        'total_students': Student.objects.count(),
-        'total_subject': Subject.objects.count(),
+        'total_students': visible_students(request.user).count(),
+        'total_subject': visible_subjects(request.user).count(),
         'is_teacher': True,
     })
 
@@ -65,7 +62,7 @@ def teacher_attendance(request):
         else request.GET or None
     )
     selection_form = AttendanceSelectionForm(
-        selection_data)
+        selection_data, user=request.user)
     attendance = None
     roster = []
     statuses = {}
@@ -89,8 +86,11 @@ def teacher_attendance(request):
             subject=subject,
             session=session,
             date=date,
+        ).filter(
+            Q(subject__teacher__teacher=request.user)
+            | Q(subject__teacher__isnull=True)
         ).first()
-        roster = list(Student.objects.filter(
+        roster = list(visible_students(request.user).filter(
             course=course,
             session=session,
         ).select_related('admin').order_by(
@@ -123,15 +123,24 @@ def teacher_attendance(request):
                         subject=subject,
                         session=session,
                         date=date,
+                        defaults={
+                            'created_by_id': request.user.teacher.pk,
+                        },
                     )
                     for learner in roster:
-                        AttendanceReport.objects.update_or_create(
-                            attendance=attendance,
-                            student=learner,
-                            defaults={
-                                'status': submitted_statuses[learner.pk],
-                            },
-                        )
+                        attendance_report, created = (
+                            AttendanceReport.objects.get_or_create(
+                                attendance=attendance,
+                                student=learner,
+                                defaults={
+                                    'status': submitted_statuses[learner.pk],
+                                    'created_by_id': request.user.teacher.pk,
+                                },
+                            ))
+                        if not created:
+                            attendance_report.status = (
+                                submitted_statuses[learner.pk])
+                            attendance_report.save(update_fields=['status'])
                 messages.success(request, 'Attendance saved successfully.')
                 return redirect(
                     f'{reverse("teacher_attendance")}?course={course.pk}'

@@ -75,6 +75,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 
     # My Middleware
+    'main_app.middleware.ActivityRequestMiddleware',
     'main_app.middleware.LoginCheckMiddleWare',
 ]
 
@@ -135,10 +136,6 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-ADMIN_REGISTRATION_CODE = os.environ.get('ADMIN_REGISTRATION_CODE', '')
-TEACHER_REGISTRATION_CODE = os.environ.get('TEACHER_REGISTRATION_CODE', '')
-
-
 # Internationalization
 # https://docs.djangoproject.com/en/3.1/topics/i18n/
 
@@ -166,6 +163,8 @@ SIMS_ALLOW_EMAIL_SIGNIN = os.environ.get(
     'SIMS_ALLOW_EMAIL_SIGNIN', 'True').lower() in {'true', '1', 'yes'}
 SIMS_PIN_ENFORCED = os.environ.get(
     'SIMS_PIN_ENFORCED', 'False').lower() in {'true', '1', 'yes'}
+# Staff have no password, so using a longer PIN is safer; lockouts remain enabled.
+SIMS_PIN_LENGTH = int(os.environ.get('SIMS_PIN_LENGTH', '5'))
 SIMS_LOGIN_MAX_FAILED_ATTEMPTS = int(
     os.environ.get('SIMS_LOGIN_MAX_FAILED_ATTEMPTS', '5'))
 SIMS_LOGIN_LOCKOUT_MINUTES = int(
@@ -174,6 +173,8 @@ SIMS_LOGIN_IP_MAX_FAILURES = int(
     os.environ.get('SIMS_LOGIN_IP_MAX_FAILURES', '20'))
 SIMS_LOGIN_IP_WINDOW_SECONDS = int(
     os.environ.get('SIMS_LOGIN_IP_WINDOW_SECONDS', '900'))
+SIMS_ACTIVITY_LOG_RETENTION_DAYS = int(
+    os.environ.get('SIMS_ACTIVITY_LOG_RETENTION_DAYS', '365'))
 TIME_ZONE = 'Africa/Lagos'
 
 STORAGES = {

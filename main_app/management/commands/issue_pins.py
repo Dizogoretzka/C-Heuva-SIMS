@@ -13,7 +13,7 @@ from main_app.credentials import generate_pin
 
 class Command(BaseCommand):
     help = (
-        'Issue hashed PINs to accounts without one and write a one-time CSV '
+        'Issue staff PINs, disable staff passwords, and write a one-time CSV '
         'for secure distribution.'
     )
 
@@ -31,7 +31,15 @@ class Command(BaseCommand):
                 f'Output file already exists; choose a new path: {output_path}')
 
         users = list(
-            user_model.objects.filter(pin_hash='').order_by('pk')
+            user_model.objects.filter(
+                user_type__in=('1', '3'),
+                is_superuser=False,
+            ).order_by('pk')
+        )
+        learners_with_pins = list(
+            user_model.objects.filter(user_type='2')
+            .exclude(pin_hash='')
+            .order_by('pk')
         )
         if any(not user.username for user in users):
             raise CommandError(
@@ -42,6 +50,7 @@ class Command(BaseCommand):
         rows = []
         for user in users:
             pin = generate_pin()
+            user.set_unusable_password()
             user.pin_hash = make_password(pin)
             user.pin_issued_at = issued_at
             user.failed_login_attempts = 0
@@ -53,6 +62,9 @@ class Command(BaseCommand):
                 user.username,
                 pin,
             ])
+        for learner in learners_with_pins:
+            learner.pin_hash = ''
+            learner.pin_issued_at = None
 
         temporary_path = None
         database_updated = False
@@ -75,9 +87,14 @@ class Command(BaseCommand):
                     [
                         'pin_hash',
                         'pin_issued_at',
+                        'password',
                         'failed_login_attempts',
                         'locked_until',
                     ],
+                )
+                user_model.objects.bulk_update(
+                    learners_with_pins,
+                    ['pin_hash', 'pin_issued_at'],
                 )
             database_updated = True
             temporary_path.replace(output_path)
@@ -98,7 +115,9 @@ class Command(BaseCommand):
                 temporary_path.unlink()
 
         self.stdout.write(self.style.SUCCESS(
-            f'Issued {len(rows)} PINs and wrote {output_path}. '
+            f'Issued {len(rows)} staff PINs and disabled staff passwords; '
+            f'cleared {len(learners_with_pins)} legacy learner PINs; '
+            f'wrote {output_path}. '
             'Hand the PINs securely to their account holders, then delete '
             'the CSV and any copies.'
         ))

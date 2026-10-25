@@ -1,8 +1,6 @@
 import re
-import secrets
 
 from django import forms
-from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db.models import Q
@@ -10,6 +8,7 @@ from django.forms.widgets import DateInput, TextInput
 
 from .credentials import verify_pin
 from .models import *
+from .models import grade_ordered_courses
 
 
 def validate_unique_username(value, user=None):
@@ -48,12 +47,12 @@ class CustomUserForm(FormSettings):
     gender = forms.ChoiceField(choices=[('M', 'Male'), ('F', 'Female')])
     first_name = forms.CharField(required=True)
     last_name = forms.CharField(required=True)
-    address = forms.CharField(widget=forms.Textarea)
+    address = forms.CharField(required=False, widget=forms.Textarea)
     password = forms.CharField(widget=forms.PasswordInput)
     widget = {
         'password': forms.PasswordInput(),
     }
-    profile_pic = forms.ImageField()
+    profile_pic = forms.ImageField(required=False)
 
     def __init__(self, *args, **kwargs):
         super(CustomUserForm, self).__init__(*args, **kwargs)
@@ -86,6 +85,7 @@ class CustomUserForm(FormSettings):
 class StudentForm(CustomUserForm):
     def __init__(self, *args, **kwargs):
         super(StudentForm, self).__init__(*args, **kwargs)
+        self.fields['course'].queryset = grade_ordered_courses()
 
     class Meta(CustomUserForm.Meta):
         model = Student
@@ -102,9 +102,9 @@ class AdminForm(CustomUserForm):
 
 
 class SubjectForm(FormSettings):
-
-    def __init__(self, *args, **kwargs):
-        super(SubjectForm, self).__init__(*args, **kwargs)
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['course'].queryset = grade_ordered_courses()
 
     class Meta:
         model = Subject
@@ -112,6 +112,28 @@ class SubjectForm(FormSettings):
 
 
 class StudentResultForm(FormSettings):
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if user and user.user_type == '3':
+            self.fields['student'].queryset = Student.objects.filter(
+                teacher__teacher=user).select_related('admin')
+            self.fields['subject'].queryset = Subject.objects.filter(
+                Q(teacher__teacher=user) | Q(teacher__isnull=True))
+
+    def clean(self):
+        cleaned_data = super().clean()
+        student = cleaned_data.get('student')
+        subject = cleaned_data.get('subject')
+        if (
+            student and subject and subject.course_id
+            and subject.course_id != student.course_id
+        ):
+            self.add_error(
+                'subject',
+                "Choose a subject assigned to the learner's grade or school-wide.",
+            )
+        return cleaned_data
+
     class Meta:
         model = StudentResult
         fields = ['student', 'subject', 'test', 'exam']
@@ -138,14 +160,21 @@ class ReportGenerationForm(forms.Form):
     subject = forms.ModelChoiceField(
         queryset=Subject.objects.all(), required=False, label='Subject')
 
-    def __init__(self, *args, role='admin', **kwargs):
+    def __init__(self, *args, role='admin', user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields['course'].queryset = grade_ordered_courses()
         if role == 'teacher':
             self.fields['report_type'].choices = (
                 ('class_list', 'Class List'),
                 ('learner_results', 'Learner Results'),
                 ('attendance_summary', 'Attendance Summary'),
             )
+            if user:
+                self.fields['course'].queryset = self.fields[
+                    'course'].queryset.filter(
+                        student__teacher__teacher=user).distinct()
+                self.fields['subject'].queryset = Subject.objects.filter(
+                    Q(teacher__teacher=user) | Q(teacher__isnull=True))
         else:
             self.fields['report_type'].choices = (
                 ('school_summary', 'School Summary'),
@@ -159,6 +188,11 @@ class ReportGenerationForm(forms.Form):
             if course_id:
                 self.fields['subject'].queryset = Subject.objects.filter(
                     Q(course_id=course_id) | Q(course__isnull=True))
+                if role == 'teacher' and user:
+                    self.fields['subject'].queryset = self.fields[
+                        'subject'].queryset.filter(
+                            Q(teacher__teacher=user)
+                            | Q(teacher__isnull=True))
 
     def clean(self):
         cleaned_data = super().clean()
@@ -185,15 +219,47 @@ class LoginActivityFilterForm(forms.Form):
         label='Login date',
     )
     course = forms.ModelChoiceField(
-        queryset=Course.objects.order_by('name'),
+        queryset=grade_ordered_courses(),
         required=False,
         label='Course / grade',
     )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields['course'].queryset = grade_ordered_courses()
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
+
+
+class ActivityLogFilterForm(forms.Form):
+    search = forms.CharField(required=False, max_length=120, label='Search')
+    action = forms.ChoiceField(
+        required=False,
+        choices=(('', 'All activity'),) + ActivityLog.ACTIONS,
+    )
+    start_date = forms.DateField(
+        required=False,
+        widget=DateInput(attrs={'type': 'date'}),
+        label='From',
+    )
+    end_date = forms.DateField(
+        required=False,
+        widget=DateInput(attrs={'type': 'date'}),
+        label='To',
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for field in self.fields.values():
+            field.widget.attrs['class'] = 'form-control'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        start_date = cleaned_data.get('start_date')
+        end_date = cleaned_data.get('end_date')
+        if start_date and end_date and start_date > end_date:
+            self.add_error('end_date', 'The end date must be on or after the start date.')
+        return cleaned_data
 
 
 class GradeBandForm(forms.ModelForm):
@@ -223,15 +289,19 @@ class ReportCardForm(forms.Form):
         label='Session / term',
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if user and user.user_type == '3':
+            self.fields['student'].queryset = Student.objects.filter(
+                teacher__teacher=user).select_related('admin').order_by(
+                    'admin__last_name', 'admin__first_name')
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 
 
 class AttendanceSelectionForm(forms.Form):
     course = forms.ModelChoiceField(
-        queryset=Course.objects.order_by('name'),
+        queryset=grade_ordered_courses(),
         label='Course / grade',
     )
     subject = forms.ModelChoiceField(
@@ -247,13 +317,26 @@ class AttendanceSelectionForm(forms.Form):
         label='Attendance date',
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if user and user.user_type == '3':
+            self.fields['course'].queryset = grade_ordered_courses().filter(
+                student__teacher__teacher=user).distinct()
+            self.fields['subject'].queryset = Subject.objects.filter(
+                Q(teacher__teacher=user) | Q(teacher__isnull=True))
         course_id = self.data.get('course') if self.is_bound else None
         if course_id:
             self.fields['subject'].queryset = Subject.objects.filter(
                 Q(course_id=course_id) | Q(course__isnull=True)
             ).order_by('name')
+            if user and user.user_type == '3':
+                self.fields['subject'].queryset = self.fields[
+                    'subject'].queryset.filter(
+                        Q(teacher__teacher=user) | Q(teacher__isnull=True))
+            if user and user.user_type == '3':
+                self.fields['subject'].queryset = self.fields[
+                    'subject'].queryset.filter(
+                        Q(teacher__teacher=user) | Q(teacher__isnull=True))
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 
@@ -264,6 +347,53 @@ class AttendanceSelectionForm(forms.Form):
         if course and subject and subject.course_id not in (None, course.pk):
             self.add_error('subject', 'Choose a subject for this course/grade.')
         return cleaned_data
+
+
+class TeacherGradeFilterForm(forms.Form):
+    teacher = forms.ModelChoiceField(
+        queryset=Teacher.objects.select_related('teacher').order_by(
+            'teacher__last_name', 'teacher__first_name'),
+        required=False,
+        empty_label='All teachers',
+    )
+    course = forms.ModelChoiceField(
+        queryset=grade_ordered_courses(),
+        required=False,
+        label='Grade',
+        empty_label='All grades',
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for field in self.fields.values():
+            field.widget.attrs['class'] = 'form-control'
+
+
+class LearnerAssignmentForm(forms.Form):
+    learners = forms.ModelMultipleChoiceField(
+        queryset=Student.objects.select_related('admin').order_by(
+            'admin__last_name', 'admin__first_name'),
+        widget=forms.SelectMultiple(attrs={'size': 12}),
+    )
+    teacher = forms.ModelChoiceField(
+        queryset=Teacher.objects.select_related('teacher').order_by(
+            'teacher__last_name', 'teacher__first_name'),
+        required=False,
+        empty_label='Unassigned',
+    )
+
+
+class SubjectAssignmentForm(forms.Form):
+    subjects = forms.ModelMultipleChoiceField(
+        queryset=Subject.objects.order_by('name'),
+        widget=forms.SelectMultiple(attrs={'size': 12}),
+    )
+    teacher = forms.ModelChoiceField(
+        queryset=Teacher.objects.select_related('teacher').order_by(
+            'teacher__last_name', 'teacher__first_name'),
+        required=False,
+        empty_label='School-wide / unassigned',
+    )
 
 
 class LeaveReportStudentForm(FormSettings):
@@ -371,71 +501,19 @@ class RegistrationForm(forms.Form):
 
 class LearnerRegistrationForm(RegistrationForm):
     course = forms.ModelChoiceField(
-        queryset=Course.objects.order_by('name'),
+        queryset=grade_ordered_courses(),
         label='Grade',
         empty_label='Select a grade',
     )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['course'].queryset = Course.objects.order_by('name')
+        self.fields['course'].queryset = grade_ordered_courses()
         self.has_grades = self.fields['course'].queryset.exists()
         self.order_fields([
             'first_name', 'last_name', 'username', 'gender',
             'password', 'confirm_password', 'course', 'profile_pic',
         ])
-
-
-class AdministratorRegistrationForm(RegistrationForm):
-    registration_code = forms.CharField(
-        label='Administrator registration code',
-        widget=forms.PasswordInput,
-    )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.order_fields([
-            'first_name', 'last_name', 'username', 'gender',
-            'password', 'confirm_password', 'profile_pic',
-            'registration_code',
-        ])
-
-    def clean_registration_code(self):
-        submitted_code = self.cleaned_data['registration_code']
-        configured_code = settings.ADMIN_REGISTRATION_CODE
-        if not configured_code:
-            raise forms.ValidationError(
-                'Administrator registration is disabled because no registration code is configured.')
-        if not secrets.compare_digest(submitted_code, configured_code):
-            raise forms.ValidationError(
-                'The administrator registration code is incorrect.')
-        return submitted_code
-
-
-class TeacherRegistrationForm(RegistrationForm):
-    registration_code = forms.CharField(
-        label='Teacher registration code',
-        widget=forms.PasswordInput,
-    )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.order_fields([
-            'first_name', 'last_name', 'username', 'gender',
-            'password', 'confirm_password', 'profile_pic',
-            'registration_code',
-        ])
-
-    def clean_registration_code(self):
-        submitted_code = self.cleaned_data['registration_code']
-        configured_code = settings.TEACHER_REGISTRATION_CODE
-        if not configured_code:
-            raise forms.ValidationError(
-                'Teacher registration is disabled because no registration code is configured.')
-        if not secrets.compare_digest(submitted_code, configured_code):
-            raise forms.ValidationError(
-                'The teacher registration code is incorrect.')
-        return submitted_code
 
 
 class TeacherAccountForm(forms.Form):
@@ -455,13 +533,6 @@ class TeacherAccountForm(forms.Form):
         widget=forms.RadioSelect,
     )
     profile_pic = forms.ImageField(required=False, label='Profile picture')
-    password = forms.CharField(
-        required=False,
-        widget=forms.PasswordInput,
-        help_text=(
-            'Required when creating a teacher; leave blank to keep the current password.'
-        ),
-    )
 
     def __init__(self, *args, user=None, **kwargs):
         self.user = user
@@ -471,8 +542,6 @@ class TeacherAccountForm(forms.Form):
             self.fields['last_name'].initial = user.last_name
             self.fields['username'].initial = user.username
             self.fields['gender'].initial = user.gender
-        else:
-            self.fields['password'].required = True
         self.fields['profile_pic'].help_text = (
             'Optional. JPG, JPEG, or PNG; maximum file size 5 MB.')
         for name, field in self.fields.items():
@@ -499,22 +568,6 @@ class TeacherAccountForm(forms.Form):
             raise forms.ValidationError(
                 'The uploaded file must be a valid JPG, JPEG, or PNG image.')
         return picture
-
-    def clean(self):
-        cleaned_data = super().clean()
-        password = cleaned_data.get('password')
-        if password:
-            user = self.user or CustomUser(
-                username=cleaned_data.get('username', ''),
-                first_name=cleaned_data.get('first_name', ''),
-                last_name=cleaned_data.get('last_name', ''),
-            )
-            try:
-                validate_password(password, user=user)
-            except ValidationError as error:
-                self.add_error('password', error)
-        return cleaned_data
-
 
 class ProfileUpdateForm(forms.Form):
     first_name = forms.CharField(max_length=150, label='First name')
@@ -564,6 +617,16 @@ class ProfileUpdateForm(forms.Form):
                 'reset_pin',
             ):
                 self.fields.pop(name)
+        elif user.user_type == '3':
+            for name in (
+                'current_password',
+                'new_password',
+                'confirm_password',
+            ):
+                self.fields.pop(name)
+        else:
+            self.fields.pop('current_pin')
+            self.fields.pop('reset_pin')
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 
@@ -585,19 +648,31 @@ class ProfileUpdateForm(forms.Form):
 
     def clean(self):
         cleaned_data = super().clean()
+        if self.user.user_type == '1':
+            return cleaned_data
+        if self.user.user_type == '3':
+            if not cleaned_data.get('reset_pin'):
+                return cleaned_data
+            current_pin = cleaned_data.get('current_pin')
+            if not self.user.pin_hash:
+                self.add_error(
+                    'current_pin',
+                    'No current PIN is set. Ask an administrator to issue one.')
+            elif not current_pin:
+                self.add_error('current_pin', 'Enter your current PIN.')
+            elif not verify_pin(current_pin, self.user.pin_hash):
+                self.add_error('current_pin', 'Current PIN is incorrect.')
+            return cleaned_data
+
         current_password = cleaned_data.get('current_password')
         new_password = cleaned_data.get('new_password')
         confirm_password = cleaned_data.get('confirm_password')
-        current_pin = cleaned_data.get('current_pin')
-        reset_pin = cleaned_data.get('reset_pin')
         password_change_requested = bool(new_password or confirm_password)
 
-        if not password_change_requested and not reset_pin:
+        if not password_change_requested:
             return cleaned_data
         if not current_password:
-            self.add_error(
-                'current_password',
-                'Enter your current password to change your password or PIN.')
+            self.add_error('current_password', 'Enter your current password.')
         elif not self.user.check_password(current_password):
             self.add_error('current_password', 'Current password is incorrect.')
 
@@ -614,15 +689,6 @@ class ProfileUpdateForm(forms.Form):
             except ValidationError as error:
                 self.add_error('new_password', error)
 
-        if reset_pin:
-            if not self.user.pin_hash:
-                self.add_error(
-                    'current_pin',
-                    'No current PIN is set. Ask an administrator to issue one.')
-            elif not current_pin:
-                self.add_error('current_pin', 'Enter your current PIN.')
-            elif not verify_pin(current_pin, self.user.pin_hash):
-                self.add_error('current_pin', 'Current PIN is incorrect.')
         return cleaned_data
 
 
@@ -646,6 +712,12 @@ class StaffCredentialResetForm(forms.Form):
     def __init__(self, *args, user, **kwargs):
         self.user = user
         super().__init__(*args, **kwargs)
+        if user.user_type == '2':
+            self.fields['action'].choices = (('password', 'Set new password'),)
+        else:
+            self.fields['action'].choices = (('pin', 'Generate new PIN'),)
+            self.fields.pop('new_password')
+            self.fields.pop('confirm_password')
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 

@@ -10,9 +10,13 @@ _PIN_DIGITS = '0123456789'
 
 
 def generate_pin():
+    pin_length = settings.SIMS_PIN_LENGTH
+    if not 4 <= pin_length <= 10:
+        raise ValueError('SIMS_PIN_LENGTH must be between 4 and 10.')
+
     while True:
-        pin = f'{secrets.randbelow(100000):05d}'
-        if int(pin) < 1000 or len(set(pin)) == 1:
+        pin = f'{secrets.randbelow(10 ** pin_length):0{pin_length}d}'
+        if len(set(pin)) == 1:
             continue
         if pin in _PIN_DIGITS or pin in _PIN_DIGITS[::-1]:
             continue
@@ -21,16 +25,20 @@ def generate_pin():
 
 def issue_pin(user):
     pin = generate_pin()
-    user.pin_hash = make_password(pin)
-    user.pin_issued_at = timezone.now()
-    user.failed_login_attempts = 0
-    user.locked_until = None
-    user.save(update_fields=[
+    update_fields = [
         'pin_hash',
         'pin_issued_at',
         'failed_login_attempts',
         'locked_until',
-    ])
+    ]
+    if user.user_type in ('1', '3') and not user.is_superuser:
+        user.set_unusable_password()
+        update_fields.append('password')
+    user.pin_hash = make_password(pin)
+    user.pin_issued_at = timezone.now()
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    user.save(update_fields=update_fields)
     return pin
 
 

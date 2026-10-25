@@ -4,7 +4,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
 from django.core.cache import cache
-from django.db import IntegrityError, transaction
+from django.db import transaction
 from django.db.models import F
 from django.contrib import messages
 from django.http import HttpResponse
@@ -12,12 +12,11 @@ from django.shortcuts import redirect, render, reverse
 from django.utils import timezone
 
 from .forms import (
-    AdministratorRegistrationForm,
     LearnerRegistrationForm,
-    TeacherRegistrationForm,
 )
 from .credentials import issue_pin, verify_pin
-from .models import Admin, CustomUser, Student, Teacher
+from .activity import record_failed_attempt
+from .models import CustomUser, Student
 from .UsernameBackend import UsernameBackend
 
 
@@ -136,12 +135,13 @@ def role_login(request, role):
             return redirect(reverse('student_home'))
         if request.user.user_type == '3':
             return redirect(reverse('teacher_home'))
-    return render(request, 'main_app/login.html', {'selected_role': role})
+    return render(request, 'main_app/login.html', {
+        'selected_role': role,
+        'pin_length': settings.SIMS_PIN_LENGTH,
+    })
 
 
-def register_role(request, role):
-    if role not in ('admin', 'teacher', 'learner'):
-        return redirect(reverse('login_page'))
+def register_learner(request):
     if request.user.is_authenticated:
         if request.user.user_type == '1':
             return redirect(reverse('admin_home'))
@@ -150,20 +150,18 @@ def register_role(request, role):
         if request.user.user_type == '3':
             return redirect(reverse('teacher_home'))
 
-    form_class = {
-        'admin': AdministratorRegistrationForm,
-        'teacher': TeacherRegistrationForm,
-        'learner': LearnerRegistrationForm,
-    }[role]
-    form = form_class(request.POST or None, request.FILES or None)
-    has_grades = getattr(form, 'has_grades', True)
+    form = LearnerRegistrationForm(
+        request.POST or None,
+        request.FILES or None,
+    )
+    has_grades = form.has_grades
     if request.method == 'POST':
         if _registration_rate_limited(request):
             messages.error(
                 request,
                 'Too many registration attempts. Please wait 15 minutes and try again.',
             )
-        elif role == 'learner' and not has_grades:
+        elif not has_grades:
             messages.error(
                 request,
                 'Learner registration is unavailable until the school adds grades.',
@@ -171,42 +169,32 @@ def register_role(request, role):
         elif form.is_valid():
             username = form.cleaned_data['username']
             password = form.cleaned_data['password']
-            user_type = {'admin': '1', 'learner': '2', 'teacher': '3'}[role]
             profile_picture = form.cleaned_data.get('profile_pic')
-            try:
-                with transaction.atomic():
-                    user = CustomUser.objects.create_user(
-                        username=username,
-                        password=password,
-                        email='',
-                        user_type=user_type,
-                        first_name=form.cleaned_data['first_name'],
-                        last_name=form.cleaned_data['last_name'],
-                        gender=form.cleaned_data['gender'],
-                        address='',
-                        profile_pic=profile_picture or '',
-                    )
-                    if role == 'learner':
-                        student = Student.objects.get(admin=user)
-                        student.course = form.cleaned_data['course']
-                        student.session = None
-                        student.save(update_fields=['course', 'session'])
-                    elif role == 'admin':
-                        Admin.objects.get(admin=user)
-                    else:
-                        Teacher.objects.get(teacher=user)
-                    pin = issue_pin(user)
-            except IntegrityError:
-                form.add_error(
-                    'username',
-                    'An account with this username already exists.',
+            with transaction.atomic():
+                user = CustomUser.objects.create_user(
+                    username=username,
+                    password=password,
+                    email='',
+                    user_type='2',
+                    first_name=form.cleaned_data['first_name'],
+                    last_name=form.cleaned_data['last_name'],
+                    gender=form.cleaned_data['gender'],
+                    address='',
+                    profile_pic=profile_picture or '',
                 )
-            else:
-                return render_pin_confirmation(request, role, pin)
+                student = Student.objects.get(admin=user)
+                student.course = form.cleaned_data['course']
+                student.session = None
+                student.save(update_fields=['course', 'session'])
+            messages.success(
+                request,
+                'Registration complete. Sign in with your username and password.',
+            )
+            return redirect(reverse('role_login', args=['learner']))
 
     return render(request, 'main_app/register.html', {
         'form': form,
-        'selected_role': role,
+        'selected_role': 'learner',
         'has_grades': has_grades,
     })
 
@@ -239,11 +227,17 @@ def doLogin(request, **kwargs):
     pin = request.POST.get('pin', '')
     backend = UsernameBackend()
     account = backend.get_user_for_identifier(identifier)
-    authenticated_user = authenticate(
-        request,
-        username=identifier,
-        password=password,
-    )
+    if role == 'learner':
+        authenticated_user = authenticate(
+            request,
+            username=identifier,
+            password=password,
+        )
+    else:
+        authenticated_user = (
+            account if account and backend.user_can_authenticate(account)
+            else None
+        )
     now = timezone.now()
     account_locked = False
     if account and account.locked_until:
@@ -266,11 +260,11 @@ def doLogin(request, **kwargs):
     role_valid = bool(
         identity_valid and account.user_type == expected_user_type)
     has_pin = bool(account and account.pin_hash)
-    pin_valid = verify_pin(pin, account.pin_hash if has_pin else '')
-    pin_policy_valid = (
-        pin_valid if has_pin else (
-            not settings.SIMS_PIN_ENFORCED and not pin)
-    )
+    pin_policy_valid = True
+    if role != 'learner':
+        pin_policy_valid = bool(
+            has_pin and verify_pin(pin, account.pin_hash)
+        )
 
     if (
         not identity_valid
@@ -279,6 +273,8 @@ def doLogin(request, **kwargs):
         or account_locked
         or ip_limited
     ):
+        if role != 'learner' or identity_valid:
+            record_failed_attempt(request, identifier)
         if not ip_limited:
             _record_login_ip_failure(request)
             if account and not account_locked:

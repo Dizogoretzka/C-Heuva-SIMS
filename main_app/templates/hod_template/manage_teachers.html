@@ -4,11 +4,15 @@
 <section class="content">
     <div class="container-fluid">
         <div class="card">
-            <div class="card-header d-flex justify-content-between">
+            <div class="card-header">
                 <h3 class="card-title">{{ page_title }}</h3>
-                <a href="{% url 'add_teacher' %}" class="btn btn-primary">Add Teacher</a>
             </div>
             <div class="card-body table-responsive">
+                <div class="mb-3">
+                    <a href="{% url 'add_teacher' %}" class="btn btn-primary rounded-0">
+                        <i class="fas fa-user-plus mr-1"></i> Add Teacher
+                    </a>
+                </div>
                 <table class="table table-bordered table-hover">
                     <thead>
                         <tr><th>Name</th><th>Username</th><th>Gender</th><th>Actions</th></tr>
@@ -21,7 +25,7 @@
                             <td>{{ profile.teacher.get_gender_display }}</td>
                             <td class="text-nowrap">
                                 <a href="{% url 'edit_teacher' profile.pk %}" class="btn btn-sm btn-primary">Edit</a>
-                                <a href="{% url 'reset_user_credentials' profile.teacher_id %}" class="btn btn-sm btn-secondary">Set password / Reset PIN</a>
+                                <a href="{% url 'reset_user_credentials' profile.teacher_id %}" class="btn btn-sm btn-secondary">Reset PIN</a>
                                 <form method="post" action="{% url 'delete_teacher' profile.pk %}"
                                       class="d-inline" onsubmit="return confirm('Delete this teacher account?');">
                                     {% csrf_token %}

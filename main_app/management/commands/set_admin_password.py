@@ -8,7 +8,7 @@ from django.db import transaction
 
 
 class Command(BaseCommand):
-    help = 'Set an administrator password without exposing a web reset page.'
+    help = 'Set a Django superuser password for Django Admin access.'
 
     def add_arguments(self, parser):
         parser.add_argument('username')
@@ -19,9 +19,10 @@ class Command(BaseCommand):
             admin = user_model.objects.get(
                 username__iexact=options['username'],
                 user_type='1',
+                is_superuser=True,
             )
         except user_model.DoesNotExist as error:
-            raise CommandError('Administrator account was not found.') from error
+            raise CommandError('Django superuser account was not found.') from error
 
         password = getpass.getpass('New administrator password: ')
         confirmation = getpass.getpass('Confirm new administrator password: ')
@@ -42,6 +43,5 @@ class Command(BaseCommand):
                 'locked_until',
             ])
         self.stdout.write(self.style.SUCCESS(
-            f'Password updated for administrator {admin.username}. '
-            'The existing PIN was not changed.'
+            f'Django superuser password updated for {admin.username}.'
         ))

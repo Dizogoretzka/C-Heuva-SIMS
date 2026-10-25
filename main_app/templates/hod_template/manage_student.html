@@ -20,6 +20,20 @@
                                 <i class="fas fa-user-plus mr-1"></i> Add Learner
                             </button>
                         </div>
+                        {% if request.user.user_type == '1' %}
+                        <form method="get" class="form-row align-items-end mb-3">
+                            {% for field in filter_form %}
+                            <div class="form-group col-md-4">
+                                {{ field.label_tag }}
+                                {{ field }}
+                            </div>
+                            {% endfor %}
+                            <div class="form-group col-md-4">
+                                <button type="submit" class="btn btn-secondary">Filter</button>
+                                <a href="{% url 'manage_student' %}" class="btn btn-light">Clear</a>
+                            </div>
+                        </form>
+                        {% endif %}
                         {% include "main_app/search_bar.html" with search_target="manage-student-list" search_placeholder="Search learners..." %}
                         <table id="manage-student-list" class="table table-bordered table-hover">
                             <thead>
@@ -28,6 +42,9 @@
                                     <th>Full Name</th>
                                     <th>Username</th>
                                     <th>Gender</th>
+                                    <th>Grade</th>
+                                    <th>Assigned teacher</th>
+                                    <th>Created by</th>
                                     <th>Avatar</th>
                                     <th>Edit</th>
                                 </tr>
@@ -39,6 +56,9 @@
                                     <td>{{student.last_name}}, {{student.first_name}}</td>
                                     <td>{{student.username}}</td>
                                     <td>{{student.gender}}</td>
+                                    <td>{{ student.student.course|default:"Not assigned" }}</td>
+                                    <td>{% if student.student.teacher %}{{ student.student.teacher }}{% else %}Unassigned{% endif %}</td>
+                                    <td>{% if student.student.created_by %}{{ student.student.created_by }}{% else %}Administrator / legacy{% endif %}</td>
                                     <td>
                                         {% if student.profile_pic == ""  %}
                                         No Image
@@ -50,7 +70,7 @@
                                     
                                     <td><a href="{% url 'edit_student' student.student.id %}" class="btn btn-primary">Edit</a> -
                                         <a href="{% url 'delete_student' student.student.id %}" class="btn btn-danger" onclick="return confirm('Are you sure about this ?')">Delete</a>
-                                        <a href="{% url 'reset_user_credentials' student.id %}" class="btn btn-secondary">Set password / Reset PIN</a>
+                                        <a href="{% url 'reset_user_credentials' student.id %}" class="btn btn-secondary">Set password</a>
 
                                     </td>
                                 </tr>

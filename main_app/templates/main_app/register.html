@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="{% static 'main_app/css/branding.css' %}">
 </head>
 <body class="hold-transition login-page">
+    {% include "main_app/page_loader.html" %}
     <div class="login-box" style="width: 480px;">
         <div class="login-logo">
             {% include "main_app/crest_logo.html" with crest_class="auth-crest" %}

@@ -51,7 +51,9 @@
                     <thead>
                         <tr>
                             <th>Learner</th>
+                            <th>Assigned teacher</th>
                             <th>Subject</th>
+                            <th>Recorded by</th>
                             <th>Test / CA</th>
                             <th>Exam</th>
                             <th>Total / Grade</th>
@@ -62,7 +64,9 @@
                         {% for result in results %}
                             <tr data-search-item>
                                 <td>{{ result.student.admin.get_full_name }}</td>
+                                <td>{% if result.student.teacher %}{{ result.student.teacher }}{% else %}Unassigned{% endif %}</td>
                                 <td>{{ result.subject.name }}</td>
+                                <td>{% if result.created_by %}{{ result.created_by }}{% else %}Administrator / legacy{% endif %}</td>
                                 <td>{{ result.test }}</td>
                                 <td>{{ result.exam }}</td>
                                 <td>{{ result.total_score }} ({{ result.grade_symbol }})</td>
@@ -80,7 +84,7 @@
                             </tr>
                         {% empty %}
                             <tr data-search-item>
-                                <td colspan="6" class="text-center text-muted">
+                                <td colspan="8" class="text-center text-muted">
                                     No learner results have been recorded yet.
                                 </td>
                             </tr>

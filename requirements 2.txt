@@ -15,39 +15,40 @@ This document describes the current behavior of the C. Heuva Junior Secondary Sc
 
 ## 2. System overview
 
-SIMS is a browser-based Django application for managing school learner and academic records. It provides username, password, and PIN sign-in; role-specific registration; profiles; learner and subject management; results and grades; attendance; communications; login activity; and downloadable PDF reports.
+SIMS is a browser-based Django application for managing school learner and academic records. Learners sign in with a username and password; administrators and teachers sign in with a username and PIN. The system provides learner self-registration, profiles, learner and subject management, results and grades, attendance, communications, administrator activity logging, learner login activity, and downloadable PDF reports.
 
-The application uses the database and media storage configured by the deployment. Email is not used for sign-in, account registration, or password recovery. Registration codes and optional browser push depend on deployment configuration and external services.
+The application uses the database and media storage configured by the deployment. Email is not used for sign-in, account registration, or password recovery. Optional browser push depends on deployment configuration and external services.
 
 ## 3. Current features
 
 ### 3.1 Landing, sign-in, and registration
 
 - The landing page offers Administrator, Teacher, and Learner sign-in choices.
-- Each role has a role-specific sign-in page. Users provide a username, password, and five-digit PIN; a valid account cannot sign in through another role's page. Failures use a generic message, and configured account and IP lockout limits apply. Legacy accounts without a username can temporarily use their email in the username field while `SIMS_ALLOW_EMAIL_SIGNIN` is enabled.
+- Each role has a role-specific sign-in page. Learners provide a username and password; administrators and teachers provide a username and PIN. A valid account cannot sign in through another role's page. Failures use a generic message, and configured account and IP lockout limits apply. Legacy accounts without a username can temporarily use their email in the username field while `SIMS_ALLOW_EMAIL_SIGNIN` is enabled.
 - Learners can register when at least one course/grade exists. They select a grade; their session/term is left unassigned until an administrator assigns it.
-- Administrator registration requires the configured `ADMIN_REGISTRATION_CODE`.
-- Teacher registration requires the separate configured `TEACHER_REGISTRATION_CODE`.
-- Registration collects first name, last name, username, gender, password, password confirmation, and an optional profile picture. Learners also select a grade. Registration codes are required for administrator and teacher accounts. Email is not collected.
+- Only learners can register themselves. Learner registration collects first name, last name, username, gender, password, password confirmation, an optional profile picture, and a grade. Email is not collected.
+- Administrators and teachers sign in only. Administrators are created by the operator with `python manage.py create_admin`; teachers are created by administrators through Manage Teachers.
 - Usernames are 4-20 characters, start with a letter or digit, use only letters, digits, dots, underscores, and hyphens, and are unique across roles without regard to case. The retained email field is optional and non-unique. Password confirmation and Django password validators are enforced. Profile pictures are optional JPG, JPEG, or PNG images up to 5 MB. Account and profile creation is transactional.
-- After registration, a one-time PIN is shown on a no-cache confirmation page; the user is redirected to sign in and is not signed in automatically. Repeated registration attempts from an IP address are rate-limited. Sign-in pages direct people who forget their password or PIN to ask a teacher or administrator.
+- After registration, the learner is directed to sign in with the chosen password and is not signed in automatically. Learner registration does not issue a PIN. Repeated registration attempts from an IP address are rate-limited. The learner sign-in page directs people who forget their password to ask a teacher or administrator.
 
 ### 3.2 Administrator interface
 
 Administrators can:
 
 - View the administrative dashboard, learner and subject totals, and recent learner sign-in information.
-- Add, list, edit, and delete learner accounts. Edit learner details and assign or change course/grade and session/term.
-- Add, list, edit, and delete teacher accounts. Set a teacher's password when creating an account or set a replacement password when editing one.
-- Add, list, edit, and delete subjects.
+- Add, list, edit, and delete learner accounts. Edit learner details and assign or change course/grade and session/term. Address and profile pictures are optional on staff learner forms. Learners created by teachers are assigned to that teacher; self-registered learners remain unassigned until an administrator assigns them.
+- Assign or reassign learners and subjects to teachers in bulk. The assignment page lists unassigned learners and school-wide subjects; clearing a teacher assignment makes a learner unassigned or a subject school-wide. Filter learner and subject lists by teacher and grade.
+- Add, list, edit, and delete teacher accounts. A generated teacher PIN is displayed once to the administrator; teacher accounts have no usable password.
+- Add, list, edit, and delete subjects. A subject may be associated with a grade or left school-wide, and assigned to a teacher or left school-wide.
 - View learner login activity, including learner name, username, course/grade, login date/time, and IP address. Filter by learner name or username, date, and course/grade; browse paginated results.
 - Review and approve or reject learner leave requests.
 - View learner feedback and send replies.
 - Send in-application notifications to learners. Browser push delivery is optional and depends on Firebase and client configuration.
-- View and update their own first name, last name, and profile picture; username is read-only. Administrator passwords and PINs cannot be changed through a web page, including Django Admin. The system operator sets them with the management commands.
-- Set replacement passwords or PINs for learner and teacher accounts. Administrators can reset either role; teachers can reset learners only. The password/PIN is shown once on a no-cache confirmation page, and resetting credentials clears lockout counters without changing the other credential.
+- View and update their own first name, last name, and profile picture; username is read-only. Administrator PINs cannot be changed through a web page, including Django Admin; the system operator manages them with management commands. Regular administrators have no usable password.
+- Set replacement learner passwords and teacher PINs. Administrators can reset learner passwords or teacher PINs; teachers can reset passwords for assigned learners only. The credential is shown once on a no-cache confirmation page, and resetting credentials clears lockout counters.
 - Generate the school-summary and class-list PDF reports.
-- View recorded attendance in a read-only attendance records page. Administrators cannot take or edit attendance.
+- View recorded attendance in a read-only attendance records page, filtered by teacher and grade. Administrators cannot take or edit attendance.
+- Review a searchable, filterable, paginated activity log, export it as CSV, and open an activity timeline for a user. Activity records include actor, action, record, changes, time, and IP address; secret values are redacted. Records are removed after the configured retention period by a management command.
 - Maintain course/grade and session/term records using Django Admin; the main administrator interface does not have dedicated course or session management pages.
 
 Administrators cannot manage learner results or grade bands, generate learner-results or attendance-summary reports, or generate report cards. Those academic functions belong to teachers.
@@ -56,64 +57,66 @@ Administrators cannot manage learner results or grade bands, generate learner-re
 
 Teachers use the administrator-style page layout and styling with a role-specific dashboard and navigation. Teachers can:
 
-- View a dashboard showing learner and subject totals.
-- View and update their own first name, last name, profile picture, and password; username is read-only. A password change requires the current password and keeps the teacher signed in. Teachers can request a new PIN from their profile by confirming their current password and PIN.
-- Set replacement passwords or PINs for learner accounts. Teachers cannot reset teacher or administrator credentials.
-- List, add, edit, and delete learner accounts using the existing learner forms and rules, including assigning a course/grade and session/term when editing.
-- View the subject list without adding, editing, or deleting subjects.
-- Create, update, and delete learner results with test/continuous-assessment and examination scores.
+- View a dashboard showing only assigned learner totals and the teacher's assigned subject totals.
+- View and update their own first name, last name, and profile picture; username is read-only. Teachers authenticate with a PIN and can request a new PIN from their profile by confirming their current PIN.
+- Set replacement passwords for assigned learner accounts. Teachers cannot reset teacher or administrator credentials.
+- List, add, edit, and delete only learners assigned to the signed-in teacher. Newly created learners are assigned to that teacher; teachers can assign course/grade and session/term when adding or editing learners.
+- Add subjects and edit or delete only their own assigned subjects. School-wide subjects are visible but read-only.
+- Create, update, and delete results only for assigned learners and for subjects assigned to that teacher or available school-wide.
 - Create, edit, and delete grade bands. The minimum score cannot exceed the maximum, and score ranges cannot overlap. Gaps are shown as warnings but do not prevent saving.
-- Generate learner report cards for a selected learner and session/term.
-- Generate class-list, learner-results, and attendance-summary PDF reports. Results and attendance reports can be filtered by subject where available.
-- Take attendance for a selected course/grade, subject, session/term, and date. Load previously entered attendance for correction. Saving updates an existing matching attendance record instead of creating a duplicate.
+- Generate learner report cards for assigned learners and a selected session/term. Teacher-generated cards include only results for that teacher's or school-wide subjects; each learner's own report card includes all of their results.
+- Generate class-list, learner-results, and attendance-summary PDF reports using assigned learners and the teacher's or school-wide subjects. Results and attendance reports can be filtered by subject where available.
+- Take attendance only for assigned learners and for the teacher's or a school-wide subject in an assigned grade. Load previously entered attendance for correction. Saving updates an existing matching attendance record instead of creating a duplicate.
 
-Teachers cannot manage teacher accounts or subjects, review leave requests, reply to feedback, send learner notifications, access learner login activity, view the school-summary report, or open administrator attendance records.
+Teachers cannot manage teacher accounts, reassign learners or subjects, review leave requests, reply to feedback, send learner notifications, access learner login activity, view the school-summary report, or open administrator attendance records.
 
 ### 3.4 Learner interface
 
 Learners can:
 
-- View their dashboard, subjects assigned to their course/grade, and subjects not assigned to a specific grade.
+- View their dashboard and subjects matching their grade that are assigned to their teacher or school-wide.
 - View only their own results. Each displayed total is the test score plus the examination score; the grade is calculated from the current grade bands.
 - Download a report card only for themselves, when results exist for their assigned session/term.
 - View only their own attendance records and calculated attendance percentage.
 - View notifications addressed to them.
 - Submit leave requests and view their status.
 - Submit feedback and view administrator replies.
-- View and update their own first name, last name, profile picture, and password; username, course/grade, and session/term are read-only on their own profile. A password change requires the current password and keeps the learner signed in. Learners can request a new PIN from their profile by confirming their current password and PIN.
+- View and update their own first name, last name, and profile picture; username, course/grade, and session/term are read-only on their own profile. Learners can change their password after confirming the current password.
 
 Learners cannot access administrator or teacher pages or see other learners' results, report cards, or attendance.
 
 ### 3.5 System operator
 
-The system operator configures the deployment, database, media storage, environment secrets, Django Admin access, and optional Firebase services. The operator assigns usernames and issues initial PINs using `create_usernames <csv_path>` and `issue_pins <csv_path>`, then securely distributes and deletes the one-time CSVs. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after usernames have been handed out. The operator sets administrator passwords and PINs with `set_admin_password <username>` and `reset_admin_pin <username>`. This is an operational responsibility rather than a fourth SIMS application role.
+The system operator configures the deployment, database, media storage, environment secrets, Django Admin access, and optional Firebase services. The operator creates administrator accounts with `python manage.py create_admin`; the command displays the generated PIN once. The operator assigns usernames and issues initial PINs to existing staff using `create_usernames <csv_path>` and `issue_pins <csv_path>`, then securely distributes and deletes the one-time CSVs. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after usernames have been handed out. Django superuser passwords remain managed through Django's operator workflows. This is an operational responsibility rather than a fourth SIMS application role.
 
 ## 4. Users and permissions
 
 | Role | Current access |
 |---|---|
-| Visitor | Landing page, role-specific sign-in and registration pages. Forgotten passwords or PINs must be reset by authorized school staff or the operator. |
-| Administrator | Learner and teacher accounts, subjects, school summary and class-list reports, learner communications and leave review, learner login activity, and read-only attendance records. |
-| Teacher | Shared learner management and read-only subjects; results, grade bands, report cards, class/results/attendance reports, and taking attendance. |
-| Learner | Own subjects, results, report card, attendance, notifications, leave requests, feedback, and restricted profile. |
+| Visitor | Landing page, role-specific sign-in pages, and learner registration. There is no administrator or teacher registration page. Forgotten learner passwords must be reset by authorized school staff; forgotten staff PINs must be reset by the administrator or operator. |
+| Administrator | Learner and teacher accounts, teacher assignments, subjects, school summary and class-list reports, learner communications and leave review, learner login activity, activity log, and read-only attendance records. |
+| Teacher | Assigned learner management and own/read-only school-wide subjects; scoped results, grade bands, report cards, class/results/attendance reports, and scoped attendance taking. |
+| Learner | Own grade-matching assigned or school-wide subjects, results, report card, attendance, notifications, leave requests, feedback, and restricted profile. |
 | System operator | Deployment and authorized Django Admin maintenance; not a separate application role. |
 
 An account has one application role and a globally unique username, compared without regard to case. The optional email field is retained for legacy data only; no email service is required. Role separation is enforced on the server, not only by navigation links. Unauthenticated visitors are redirected away from protected pages. The selected role at sign-in must match the authenticated account's role.
 
 ## 5. Data and business rules
 
-1. `CustomUser` stores a case-insensitively unique username, optional non-unique email retained for legacy accounts, password hash, gender, profile image, a five-digit PIN hash and issuance time, and one of the administrator, teacher, or learner role values. Each role has its corresponding one-to-one profile.
+1. `CustomUser` stores a case-insensitively unique username, optional non-unique email retained for legacy accounts, a password hash for learners, gender, optional address and profile image, a configurable-length PIN hash and issuance time for staff, and one of the administrator, teacher, or learner role values. Regular staff password hashes are unusable. Each role has its corresponding one-to-one profile.
 2. A username has 4-20 characters, starts with a letter or digit, and contains only letters, digits, dots, underscores, and hyphens. The username may remain empty only during legacy-account migration; `create_usernames` assigns a unique username to each account that lacks one.
-3. Learner course/grade and session/term assignments may be empty. Public learner registration assigns a grade and leaves the session/term unassigned.
-4. A subject may be assigned to a course/grade or be available to all grades. Teachers can view subjects but only administrators can change them.
-5. A learner result stores test/continuous-assessment and examination scores. The displayed total is their sum. The application does not define a universal maximum score.
-6. Grade bands are created and maintained by teachers; the application does not create default bands. Grade symbols are calculated at display time using inclusive minimum and maximum boundaries. Results outside configured bands display "Not graded." Existing results reflect subsequent grade-band changes without being rewritten.
-7. An attendance record identifies a course/grade, subject, session/term, and date. Its per-learner records store present or absent. Re-entering the same course, subject, session/term, and date loads and updates the existing record. A unique database constraint prevents duplicate attendance sessions for that selection.
-8. A learner's attendance percentage is the number of that learner's present records divided by their marked attendance records. Learners see only records associated with their own profile.
-9. Learner login activity is recorded only after successful learner sign-in. Administrator and teacher sign-ins and failed sign-ins do not create learner login-activity records.
-10. Password and PIN reset actions clear failed-attempt counters and active locks while preserving the other credential. Self-service profile changes require the current password; self-service PIN changes also require the current PIN.
-11. Leave requests, feedback, replies, notifications, results, and attendance entries are associated with learner profiles. Deleting related accounts follows configured database relationships.
-12. Results use the learner's currently assigned session/term; a result does not contain a separate session/term field.
+3. Learner course/grade, session/term, teacher assignment, and creator may be empty. Public learner registration assigns a grade, leaves session/term unassigned, and does not assign a teacher. Teacher-created learners are assigned to their creating teacher. Teacher accounts are created by administrators through Manage Teachers, which displays the generated PIN once. The operator creates administrator accounts with `python manage.py create_admin`, which displays the generated PIN once.
+4. A subject may be assigned to a course/grade and teacher, or made school-wide by leaving either assignment empty. Teacher assignment is distinct from creator. Reassignment does not change the creator. Learner, subject, result, and attendance creator references use nullable `SET_NULL` relationships, so deleting a teacher does not delete these records. Existing learner and login-activity timestamps remain null after migration instead of receiving fabricated historical dates.
+5. Teachers see only assigned learners. They may manage results only for those learners and for their own or school-wide subjects. Teachers may take attendance only for their assigned learners and their own or school-wide subjects. Learners see grade-matching subjects assigned to their teacher or school-wide subjects. A learner's own report card includes all their results; teacher-generated cards include only results the teacher may access.
+6. A learner result stores test/continuous-assessment and examination scores. The displayed total is their sum. The application does not define a universal maximum score.
+7. Grade bands are created and maintained by teachers; the application does not create default bands. Grade symbols are calculated at display time using inclusive minimum and maximum boundaries. Results outside configured bands display "Not graded." Existing results reflect subsequent grade-band changes without being rewritten.
+8. An attendance record identifies a course/grade, subject, session/term, and date. Its per-learner records store present or absent. Re-entering the same course, subject, session/term, and date loads and updates the existing record. A unique database constraint prevents duplicate attendance sessions for that selection.
+9. A learner's attendance percentage is the number of that learner's present records divided by their marked attendance records. Learners see only records associated with their own profile.
+10. Learner login activity is recorded only after successful learner sign-in. Administrator and teacher sign-ins and failed sign-ins do not create learner login-activity records. Administrator and teacher sign-ins, failed attempts, and tracked record mutations are recorded separately in the administrator activity log; secrets are never stored in activity details.
+11. Password and PIN reset actions clear failed-attempt counters and active locks. Learners authenticate and change their own password; staff authenticate with PIN only. Teachers may replace their own PIN after confirming the current PIN.
+12. Leave requests, feedback, replies, notifications, results, and attendance entries are associated with learner profiles. Deleting related accounts follows configured database relationships.
+13. Results use the learner's currently assigned session/term; a result does not contain a separate session/term field.
+14. `ActivityLog` stores action, actor username, optional actor and target-user references, target identity snapshots, record type and identifier, a redacted change summary, IP address, and timestamp. `SIMS_ACTIVITY_LOG_RETENTION_DAYS` controls expiry; the `prune_activity_log` command removes older entries.
 
 ## 6. Reports
 
@@ -131,27 +134,28 @@ The following statements replace or update the corresponding role and feature re
 
 | Requirement | Updated wording |
 |---|---|
-| FR-002 | The system must provide role-specific sign-in using username, password, and five-digit PIN. It must compare usernames without regard to case, display the same generic error for failed sign-in, enforce the selected role, and apply configured account and IP lockout limits. Until the operator disables `SIMS_ALLOW_EMAIL_SIGNIN`, an account with no username may use its email as a temporary sign-in identifier. |
-| FR-007 | The system must allow visitors to register as a learner, teacher, or administrator without an email address. Usernames must follow the 4-20 character rule and be unique across roles without regard to case. Learner registration requires an existing grade; teacher and administrator registration require their separately configured registration codes. Successful registration must issue and display a one-time PIN without automatically signing in the user. |
-| FR-008 | The system must not provide email-based password reset. Teachers may set a learner's password or PIN; administrators may set a learner's or teacher's password or PIN. Administrator credentials may be reset only by the system operator using management commands; no administrator password-change page is available, including in Django Admin. Teachers and learners may change their own password, and teachers/learners may request a new PIN, from their profile after confirming the required current credentials. |
+| FR-002 | The system must provide role-specific sign-in: learners use username and password; administrators and teachers use username and configurable-length numeric PIN. It must compare usernames without regard to case, display the same generic error for failed sign-in, enforce the selected role, and apply configured account and IP lockout limits. Until the operator disables `SIMS_ALLOW_EMAIL_SIGNIN`, a legacy account with no username may use its email as a temporary sign-in identifier. |
+| FR-007 | The system must allow visitors to self-register only as learners, without an email address and when at least one grade exists. Administrators and teachers must not self-register and must have role-specific sign-in pages without registration links. Usernames must follow the 4-20 character rule and be unique across roles without regard to case. Learners set their password during registration; registration does not issue a PIN or sign the learner in. |
+| FR-008 | The system must not provide email-based password reset. Teachers may reset passwords for assigned learners; administrators may reset learner passwords and teacher PINs. Administrator PINs are managed by the operator with `create_admin` or `reset_admin_pin <username>`. No administrator credential-change page is available, including in Django Admin. Teachers may request a new PIN from their profile after confirming the current PIN. |
 | FR-010 | Learner account creation and management must use a username instead of an email address. Email must not be required for registration or sign-in and must not be used as the account's unique identifier. |
 | FR-011 | The learner profile and staff learner-management pages must display the username. The optional email field may retain legacy data but must not be required or editable through these account forms. |
-| Section 4 - Administrator | An administrator manages learner and teacher accounts, subjects, the school-summary and class-list reports, learner notifications, leave requests and feedback, learner login activity, and read-only attendance records. Administrators cannot manage results or grade bands, generate learner-results or attendance-summary reports, generate report cards, take attendance, or set administrator credentials through a web page. |
-| Section 4 - Teacher | A teacher has a separate role and dashboard. Teachers manage learner accounts, view but cannot edit subjects, manage results and grade bands, generate learner report cards and class/results/attendance reports, and record or correct attendance. Teacher account registration requires a configured teacher registration code. |
-| Section 4 - Learner | A learner can view only their own subjects, results, report card, attendance, notifications, leave requests, feedback, and restricted profile. Learners cannot access administrator or teacher functions or another learner's records. |
-| FR-003 | The application must authenticate a visitor through the selected Administrator, Teacher, or Learner sign-in page using username, password, and PIN; it must reject credentials when the account's role does not match the selected role. |
+| Section 4 - Administrator | An administrator manages learner and teacher accounts and assigns learners and subjects to teachers. Administrators manage subjects, the school-summary and class-list reports, learner notifications, leave requests and feedback, learner login activity, activity logs, and read-only attendance records. Administrators cannot manage results or grade bands, generate learner-results or attendance-summary reports, generate report cards, take attendance, or set administrator credentials through a web page. |
+| Section 4 - Teacher | A teacher has a separate role and dashboard. Teachers manage only assigned learners, create and manage their own subjects, view school-wide subjects read-only, and manage results and attendance only for assigned learners and own or school-wide subjects. They also manage grade bands and generate scoped reports and report cards. Administrators create teacher accounts through Manage Teachers, where the generated PIN is displayed once and no password is set. |
+| Section 4 - Learner | A learner can view only their own grade-matching subjects assigned to their teacher or available school-wide, results, report card, attendance, notifications, leave requests, feedback, and restricted profile. Learners cannot access administrator or teacher functions or another learner's records. |
+| FR-003 | The application must authenticate a visitor through the selected role sign-in page using username and that role's secret (learner password or staff PIN); it must reject credentials when the account's role does not match the selected role. |
 | FR-005 | The server must enforce role permissions for all protected pages and actions: administrators cannot use teacher-only academic functions; teachers cannot use administrator-only functions; and learners cannot use either staff role's functions. Unauthenticated visitors must be redirected to the sign-in entry point. |
 | FR-014 | A teacher must be able to create, update, and delete learner results, including test/continuous-assessment and examination scores. The displayed total must be calculated as the sum of those scores. Administrators must not access result-management pages or actions. |
 | FR-028 | An administrator must be able to generate a school-summary PDF. A teacher must not access the school-summary report. |
-| FR-029 | An administrator or teacher must be able to generate a class-list PDF filtered by course/grade and session/term. |
-| FR-030 | A teacher must be able to generate learner-results and attendance-summary PDFs filtered by course/grade and session/term, with an optional subject filter. Administrators must not generate these reports. |
+| FR-029 | An administrator or teacher must be able to generate a class-list PDF filtered by course/grade and session/term. Teacher reports must include only learners assigned to that teacher. |
+| FR-030 | A teacher must be able to generate learner-results and attendance-summary PDFs filtered by course/grade and session/term, with an optional subject filter. Reports must include only assigned learners and the teacher's or school-wide subjects. Administrators must not generate these reports. |
 | FR-031 | Reports must require their applicable selections and must display a no-data message instead of returning an empty PDF. The learner-results and attendance-summary reports are teacher-only; the school-summary report is administrator-only; the class-list report is shared by administrators and teachers. |
 | FR-052 | Teachers must be able to add, edit, list, and delete grade bands containing a symbol, minimum score, maximum score, description, and optional report-card remark. The minimum cannot exceed the maximum and score ranges cannot overlap. Gaps must be shown as warnings without preventing a save. Administrators must not manage grade bands. |
 | FR-053 | The application must calculate the grade from current grade bands when displaying each result. Boundaries are inclusive; a total outside all bands must display "Not graded." Changing a band must update grades displayed for existing results without changing the stored result. |
 | FR-054 | A teacher must be able to generate a report card for a selected learner and session/term. It must include subject test and examination scores, total, grade, band description and remark, average total, and blank class-teacher and principal remark lines. No matching results must produce a no-data message, not an empty PDF. A learner may download only their own report card. Administrators must not generate report cards. |
 | FR-055 | A teacher must be able to select a course/grade, subject, session/term, and date; mark each learner present or absent; and save attendance. An existing matching attendance session must load for correction, and a duplicate must not be created. Administrators may view attendance records but cannot take attendance. Learners must see only their own records and attendance percentage. |
-| FR-056 | Administrator teacher-management pages must support listing, adding, editing, and deleting teacher accounts, including setting or replacing a teacher password. Teacher-management pages must be inaccessible to teachers and learners. |
-| FR-057 | Teacher registration must require a valid `TEACHER_REGISTRATION_CODE` configured outside source control. If the code is wrong or unset, registration must fail. |
+| FR-056 | Administrator teacher-management pages must support listing, adding, editing, and deleting teacher accounts. A generated teacher PIN must be displayed once to the administrator; staff accounts must not have usable passwords. Teacher-management pages must be inaccessible to teachers and learners. |
+| FR-057 | The system must record administrator and teacher sign-ins, failed sign-ins, and tracked record creation, update, and deletion in an administrator-only activity log. Log details must redact secrets and support search, action/date filters, pagination, CSV export, and a per-user timeline. The configurable retention command must delete expired log entries. |
+| FR-058 | The system must display a shared crest-based loading indicator on application and sign-in pages. It must expose an accessible status, honor reduced-motion preferences, remain visible for a brief minimum interval to avoid flashing, and dismiss when page resources load or after a bounded timeout. |
 | NFR-006 | Email and SMTP must not be required or used by SIMS for authentication, registration, notifications, or password recovery. The email column is optional, non-unique legacy data; usernames are the account identifier. |
 
 ### 7.2 SMTP and email services
@@ -167,40 +171,42 @@ SIMS does not send email and requires no SMTP host, credentials, or email settin
 - Email-based password or PIN recovery, SMTP delivery, and email notifications are not implemented.
 - Usernames and initial PINs must be distributed by authorized school staff using the one-time CSVs. Until usernames have been assigned, legacy email sign-in remains enabled when `SIMS_ALLOW_EMAIL_SIGNIN=True`.
 - Default grade bands, a universal score maximum, or automatic validation that all result totals fit a school-wide score range.
-- Guaranteed service availability, performance targets, backup/restore procedures, or data-retention schedules.
+- Guaranteed service availability, performance targets, backup/restore procedures, or retention schedules for records other than the configurable activity log.
 
 ### Known limitations
 
-- Existing accounts must receive usernames and initial PINs from the operator-generated CSV files. The school is responsible for distributing those values securely and removing the CSV copies.
+- Existing staff accounts must receive usernames and initial PINs from the operator-generated CSV files. Learners use passwords and do not receive PINs. The school is responsible for distributing staff PINs securely and removing the CSV copies.
 - Temporary email sign-in is available only for accounts without a username and only while `SIMS_ALLOW_EMAIL_SIGNIN=True`; it must be disabled after username distribution.
-- The application has no email-based password/PIN recovery. Forgotten learner and teacher credentials require an authorized teacher or administrator; administrator credentials require the operator.
+- The application has no email-based recovery. Forgotten learner passwords require an authorized teacher or administrator; staff PINs require an administrator or operator.
 - The system does not enforce a universal maximum result score or require grade bands to cover every possible total.
 
 ## 9. Operational and security notes
 
-- Set `ADMIN_REGISTRATION_CODE` and `TEACHER_REGISTRATION_CODE` securely in the deployment environment. Do not put either code in source control.
-- Run `create_usernames <csv_path>` and `issue_pins <csv_path>` for existing accounts; distribute each CSV securely and delete all copies. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after username distribution.
-- Use `set_admin_password <username>` and `reset_admin_pin <username>` for administrator credentials. There is no administrator credential-reset web page.
+- Create administrator accounts with `python manage.py create_admin`; the operator enters the administrator's name, username, and required profile details, and the command displays the generated PIN once. Staff accounts have unusable passwords.
+- Run `create_usernames <csv_path>` and `issue_pins <csv_path>` for existing accounts; distribute the staff PIN CSV securely and delete all copies. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after username distribution.
+- Use `python manage.py prune_activity_log` to remove activity entries older than `SIMS_ACTIVITY_LOG_RETENTION_DAYS` (default 365); `--days` can override the period for a run. Django superuser passwords remain managed through Django's operator workflows.
 - Passwords are stored using Django's password-hashing mechanism and validated with configured Django password validators.
 - Production deployments must provide secrets outside source control, use HTTPS, configure allowed hosts and persistent database/media storage, and restrict database, Django Admin, and backup access.
 - The application handles learner personal data. The school/operator is responsible for determining applicable privacy, consent, retention, and backup practices.
 
 ### School-staff credential reset note
 
-When a learner forgets a password or PIN, an administrator or teacher can open that learner's account and choose **Set password / Reset PIN**. Administrators can do this for learners and teachers; teachers can do it for learners only. A replacement password or generated PIN is shown once after saving, so staff should give it directly to the account holder and avoid recording or sharing it in an unsecured channel. Resetting one credential clears the lockout but leaves the other credential unchanged. Forgotten administrator credentials must be reset by the system operator with `set_admin_password <username>` or `reset_admin_pin <username>`.
+When a learner forgets a password, an administrator or the learner's assigned teacher can set a replacement. Administrators can also reset a teacher's PIN. A replacement password or generated PIN is shown once after saving, so staff should give it directly to the account holder and avoid recording or sharing it in an unsecured channel. Resetting a credential clears the lockout. Forgotten administrator PINs must be handled by the operator.
 
 ## 10. Acceptance criteria
 
-1. The landing page offers administrator, teacher, and learner sign-in. Each role's login accepts a username, password, and PIN only for accounts assigned to that role; sign-in failures use a generic message and configured lockout rules.
-2. Each role can register without email. Username validation, case-insensitive uniqueness, role-specific registration codes, password/image validation, and one-time PIN confirmation work as specified. Legacy email sign-in can be disabled after usernames are distributed.
-3. Administrators can manage learner and teacher accounts and subjects, reset learner/teacher credentials, review leave and feedback, send notifications, view learner login activity, view attendance records, and generate school-summary and class-list reports.
-4. Teachers can manage learners, view subjects read-only, manage results and grade bands, generate report cards and class/results/attendance reports, take or correct attendance, reset learner credentials, and update their own profile.
-5. Administrators cannot access teacher-only results, grade-band, report-card, results-report, or attendance-taking functions. Teachers cannot access administrator-only teacher management, subject editing, leave/feedback/notification, login-activity, school-summary, or attendance-record pages.
-6. Learners can access only their own results, report card, attendance, notifications, leave requests, feedback, and restricted profile. Teachers/learners cannot set administrator credentials, and administrator credentials cannot be changed through any web page, including Django Admin.
-7. Users can change their own password with the current password; teachers and learners can request a new PIN with their current password and PIN. Staff credential resets clear locks and preserve the other credential.
+1. The landing page offers administrator, teacher, and learner sign-in. Learners authenticate with username/password; administrators and teachers use username/PIN only. Sign-in failures use a generic message and configured lockout rules.
+2. Learners can register without email when a grade exists; username validation, case-insensitive uniqueness, password/image validation, and password-based sign-in work as specified. Administrator and teacher registration URLs return 404, and their sign-in pages do not link to registration. Teachers are created through Manage Teachers; administrators are created by the operator with `python manage.py create_admin`. Legacy email sign-in can be disabled after usernames are distributed.
+3. Administrators can manage learner and teacher accounts, assign learners and subjects to teachers, manage subjects, reset learner/teacher credentials, review leave and feedback, send notifications, view learner login activity, view and filter attendance records, and generate school-summary and class-list reports.
+4. Teachers can manage only assigned learners, create and manage their own subjects, view school-wide subjects read-only, manage results and grade bands within their scope, generate scoped report cards and class/results/attendance reports, take or correct attendance for assigned learners, reset assigned learner credentials, and update their own profile.
+5. Administrators cannot access teacher-only results, grade-band, report-card, results-report, or attendance-taking functions. Teachers cannot access administrator-only assignments, teacher management, leave/feedback/notification, login-activity, school-summary, or attendance-record pages, and cannot access another teacher's learner or subject management endpoints.
+6. Learners can access only their own results, report card, attendance, notifications, leave requests, feedback, and restricted profile. Their subjects must match their grade and be assigned to their teacher or school-wide. Teachers/learners cannot set administrator credentials, and administrator credentials cannot be changed through any web page, including Django Admin.
+7. Learners can change their own password with the current password. Teachers can request a new PIN with their current PIN. Staff credential resets clear locks; staff accounts do not use passwords.
 8. Attendance saves present/absent status for the selected class and date, updates an existing matching session rather than creating a duplicate, and displays an individual's attendance percentage to that learner.
 9. Reports return PDFs for matching records and display a no-data message when there are no matching records. Login activity and account reports display usernames rather than email addresses.
 10. Production deployment configures secrets, HTTPS, database/media storage, and optional Firebase services separately from source code. SMTP is not required or used.
+11. Administrator activity logs cover sign-ins, failed sign-ins, and tracked record creation, updates, and deletion; sensitive values are redacted. Administrators can filter, search, paginate, export CSV, and view a user timeline. The configured retention command removes expired entries.
+12. The shared crest loading indicator is accessible to assistive technology, honors reduced-motion settings, and dismisses after page loading with a bounded timeout.
 
 ## 11. Traceability
 

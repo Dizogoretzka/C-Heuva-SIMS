@@ -23,6 +23,7 @@
 </head>
 
 <body class="hold-transition login-page">
+    {% include "main_app/page_loader.html" %}
     <div class="login-box">
         <div class="login-logo">
             {% include "main_app/crest_logo.html" with crest_class="auth-crest" %}
@@ -53,6 +54,7 @@
                             </div>
                         </div>
                     </div>
+                    {% if selected_role == 'learner' %}
                     <div class="input-group mb-3">
                         <input required type="password" name='password' class="form-control" placeholder="Password">
                         <div class="input-group-append">
@@ -60,17 +62,20 @@
                                 <span class="fas fa-lock"></span>
                             </div>
                         </div>
-                        <div class="input-group mb-3">
-                            <input type="password" name="pin" class="form-control"
-                                   placeholder="5-digit PIN" inputmode="numeric"
-                                   pattern="[0-9]{5}" maxlength="5" autocomplete="off">
-                            <div class="input-group-append">
-                                <div class="input-group-text">
-                                    <span class="fas fa-key"></span>
-                                </div>
+                    </div>
+                    {% else %}
+                    <div class="input-group mb-3">
+                        <input required type="password" name="pin" class="form-control"
+                               placeholder="{{ pin_length }}-digit PIN" inputmode="numeric"
+                               pattern="[0-9]+" maxlength="{{ pin_length }}"
+                               autocomplete="off">
+                        <div class="input-group-append">
+                            <div class="input-group-text">
+                                <span class="fas fa-key"></span>
                             </div>
                         </div>
                     </div>
+                    {% endif %}
                     <div class="row">
                         <div class="col-8">
                             <div class="icheck-primary">
@@ -90,14 +95,16 @@
                     </div>
                 </form>
 
-                <p class="text-muted">Forgot your password or PIN? Ask your teacher or administrator to reset it.</p>
+                {% if selected_role == 'learner' %}
+                <p class="text-muted">Forgot your password? Ask your teacher or administrator to reset it.</p>
 
                 <p class="mb-0">
-                    <a href="{% url 'register_role' selected_role %}">Don't have an account? Register</a>
+                    <a href="{% url 'register_learner' %}">Don't have an account? Register</a>
                 </p>
                 <p class="mb-0">
                     <a href="{% url 'login_page' %}">Choose a different interface</a>
                 </p>
+                {% endif %}
 
             </div>
             <!-- /.login-card-body -->

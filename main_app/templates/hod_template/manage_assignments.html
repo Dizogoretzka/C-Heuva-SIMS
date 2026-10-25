@@ -1,0 +1,102 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card card-outline card-secondary">
+            <div class="card-body">
+                <form method="get" class="form-row align-items-end">
+                    {% for field in filter_form %}
+                    <div class="form-group col-md-4">
+                        {{ field.label_tag }}
+                        {{ field }}
+                    </div>
+                    {% endfor %}
+                    <div class="form-group col-md-4">
+                        <button type="submit" class="btn btn-secondary">Filter choices</button>
+                        <a href="{% url 'manage_assignments' %}" class="btn btn-light">Clear</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Assign learners</h3>
+                    </div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="assignment_type" value="learners">
+                        <div class="card-body">
+                            {% for field in learner_form %}
+                            <div class="form-group">
+                                {{ field.label_tag }}
+                                {{ field }}
+                                {% for error in field.errors %}
+                                <div class="text-danger">{{ error }}</div>
+                                {% endfor %}
+                            </div>
+                            {% endfor %}
+                            <p class="text-muted">Choose one or more learners. Choosing Unassigned clears their teacher assignment.</p>
+                        </div>
+                        <div class="card-footer">
+                            <button class="btn btn-primary" type="submit">Save learner assignments</button>
+                        </div>
+                    </form>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">Unassigned learners</h3></div>
+                    <div class="card-body">
+                        <ul class="mb-0">
+                            {% for learner in unassigned_learners %}
+                            <li>{{ learner.admin.get_full_name|default:learner.admin.username }}{% if learner.course %} — {{ learner.course }}{% endif %}</li>
+                            {% empty %}
+                            <li>All learners are assigned.</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Assign subjects</h3>
+                    </div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="assignment_type" value="subjects">
+                        <div class="card-body">
+                            {% for field in subject_form %}
+                            <div class="form-group">
+                                {{ field.label_tag }}
+                                {{ field }}
+                                {% for error in field.errors %}
+                                <div class="text-danger">{{ error }}</div>
+                                {% endfor %}
+                            </div>
+                            {% endfor %}
+                            <p class="text-muted">Choose one or more subjects. School-wide / unassigned makes them available across the school.</p>
+                        </div>
+                        <div class="card-footer">
+                            <button class="btn btn-primary" type="submit">Save subject assignments</button>
+                        </div>
+                    </form>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">Unassigned school-wide subjects</h3></div>
+                    <div class="card-body">
+                        <ul class="mb-0">
+                            {% for subject in unassigned_subjects %}
+                            <li>{{ subject.name }}{% if subject.course %} — {{ subject.course }}{% endif %}</li>
+                            {% empty %}
+                            <li>All subjects have a teacher assignment.</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

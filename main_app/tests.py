@@ -20,6 +20,7 @@ from PIL import Image
 
 from .models import (
     Admin,
+    ActivityLog,
     Attendance,
     AttendanceReport,
     Course,
@@ -34,6 +35,7 @@ from .models import (
 )
 from .credentials import generate_pin, issue_pin
 from .views import render_pin_confirmation
+from .activity import reset_current_request, set_current_request
 
 
 class CrestBrandingTests(TestCase):
@@ -58,15 +60,24 @@ class CrestBrandingTests(TestCase):
             response,
             f'href="{static("main_app/img/apple-touch-icon.png")}"',
         )
+        self.assertContains(response, 'id="page-loader"')
+        self.assertContains(
+            response,
+            static('main_app/css/page-loader.css'),
+        )
+        self.assertContains(
+            response,
+            static('main_app/js/page-loader.js'),
+        )
 
-    def test_landing_sign_in_registration_and_pin_pages_show_branding(self):
+    def test_landing_sign_in_learner_registration_and_pin_pages_show_branding(self):
         self._assert_page_branding(self.client.get(reverse('login_page')))
         for role in ('admin', 'teacher', 'learner'):
             with self.subTest(role=role):
                 self._assert_page_branding(
                     self.client.get(reverse('role_login', args=[role])))
-                self._assert_page_branding(
-                    self.client.get(reverse('register_role', args=[role])))
+        self._assert_page_branding(
+            self.client.get(reverse('register_learner')))
 
         pin_response = render_pin_confirmation(
             RequestFactory().get('/'),
@@ -113,6 +124,7 @@ class CrestBrandingTests(TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(
                     response, 'alt="C. Heuva school crest"')
+                self.assertContains(response, 'id="page-loader"')
                 self.assertContains(response, panel_name)
                 self.client.logout()
 
@@ -135,6 +147,15 @@ class CrestBrandingTests(TestCase):
                 expected = Path(
                     'main_app/static/main_app/img', image_name).read_bytes()
                 self.assertEqual(b''.join(response.streaming_content), expected)
+
+        for asset in (
+                'main_app/css/page-loader.css',
+                'main_app/js/page-loader.js',
+        ):
+                with self.subTest(asset=asset):
+                    response = self.client.get(static(asset))
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(b''.join(response.streaming_content))
 
         response = self.client.get('/favicon.ico', follow=True)
         self.assertEqual(response.status_code, 200)
@@ -211,6 +232,12 @@ class InterfaceSelectionTests(TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, f'Sign in as {role.title()}')
+                if role == 'learner':
+                    self.assertContains(response, 'name=\'password\'')
+                    self.assertNotContains(response, 'name="pin"')
+                else:
+                    self.assertContains(response, 'name="pin"')
+                    self.assertNotContains(response, 'name=\'password\'')
 
     def test_learner_can_sign_in_through_learner_interface(self):
         learner = CustomUser.objects.create_user(
@@ -234,19 +261,32 @@ class InterfaceSelectionTests(TestCase):
         )
         activity = LoginActivity.objects.get(student=learner.student)
         self.assertEqual(activity.ip_address, '203.0.113.12')
+        self.assertFalse(learner.pin_hash)
+        self.assertTrue(learner.check_password('valid-password'))
 
     def test_administrator_login_does_not_create_login_activity(self):
-        CustomUser.objects.create_user(
-            email='admin-login@example.com',
+        admin = CustomUser.objects.create_user(
+            username='admin-login',
             password='valid-password',
             user_type='1',
             gender='F',
             address='',
         )
+        admin_pin = issue_pin(admin)
 
         response = self.client.post(reverse('user_login'), {
-            'username': 'admin-login@example.com',
+            'username': admin.username,
             'password': 'valid-password',
+            'role': 'admin',
+        })
+        self.assertRedirects(
+            response,
+            reverse('role_login', args=['admin']),
+            fetch_redirect_response=False,
+        )
+        response = self.client.post(reverse('user_login'), {
+            'username': admin.username,
+            'pin': admin_pin,
             'role': 'admin',
         })
 
@@ -258,7 +298,7 @@ class InterfaceSelectionTests(TestCase):
         self.assertEqual(LoginActivity.objects.count(), 0)
 
     def test_failed_learner_login_does_not_create_login_activity(self):
-        CustomUser.objects.create_user(
+        learner = CustomUser.objects.create_user(
             email='failed-login@example.com',
             password='valid-password',
             user_type='2',
@@ -278,6 +318,13 @@ class InterfaceSelectionTests(TestCase):
             fetch_redirect_response=False,
         )
         self.assertEqual(LoginActivity.objects.count(), 0)
+        failure = ActivityLog.objects.get(
+            action='failed_sign_in',
+            object_type='authentication',
+            target_user=learner,
+        )
+        self.assertNotIn('wrong-password', failure.description)
+        self.assertEqual(failure.changes, {})
 
     def test_learner_profile_is_created_and_dashboard_loads(self):
         learner = CustomUser.objects.create_user(
@@ -474,15 +521,23 @@ class InterfaceSelectionTests(TestCase):
         self.assertContains(response, 'data-target="#addStudentModal"')
         self.assertContains(response, 'action="' + reverse('add_student') + '"')
         self.assertNotContains(response, 'addSubjectModal')
-        self.assertNotContains(response, 'Course / grade')
-        self.assertNotContains(response, 'Session / term')
-        self.assertNotContains(response, 'id_course')
-        self.assertNotContains(response, 'id_session')
+        self.assertContains(response, 'id_course')
+        self.assertContains(response, 'id_session')
         self.assertContains(response, 'Add Learner')
         self.assertNotContains(response, 'Add Student')
         self.assertNotContains(response, 'Add Subject</p>')
         self.assertContains(response, 'listed-learner')
         self.assertNotContains(response, 'legacy-learner@example.com')
+
+    def test_address_and_profile_picture_are_optional_in_staff_forms(self):
+        from .forms import StudentForm, TeacherAccountForm
+
+        student_form = StudentForm()
+        teacher_form = TeacherAccountForm()
+
+        self.assertFalse(student_form.fields['address'].required)
+        self.assertFalse(student_form.fields['profile_pic'].required)
+        self.assertFalse(teacher_form.fields['profile_pic'].required)
 
     def test_manage_students_restores_missing_learner_profile(self):
         admin = CustomUser.objects.create_user(
@@ -545,7 +600,7 @@ class InterfaceSelectionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'data-target="#addSubjectModal"')
         self.assertContains(response, 'action="' + reverse('add_subject') + '"')
-        self.assertNotContains(response, 'id_course')
+        self.assertContains(response, 'id_course')
 
     def test_invalid_subject_submission_reopens_subject_modal(self):
         admin = CustomUser.objects.create_user(
@@ -933,6 +988,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         self.subject = Subject.objects.create(
             name='Science',
             course=self.course,
+            teacher=self.teacher.teacher,
         )
 
     def _learner(self, email, first_name):
@@ -949,6 +1005,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         )
         learner.student.course = self.course
         learner.student.session = self.session
+        learner.student.teacher = self.teacher.teacher
         learner.student.save()
         return learner
 
@@ -1020,14 +1077,14 @@ class TeacherRoleAndAttendanceTests(TestCase):
                 'profile_pic': self._image(),
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertIn('issued_pin', response.context)
+        self.assertRedirects(
+            response, reverse('manage_student'),
+            fetch_redirect_response=False)
         added_learner = CustomUser.objects.get(
             username='new-class-learner',
             user_type='2',
         )
-        self.assertTrue(check_password(
-            response.context['issued_pin'], added_learner.pin_hash))
+        self.assertFalse(added_learner.pin_hash)
 
         learner = self._learner('teacher-edit-learner@example.com', 'Before')
         response = self.client.post(
@@ -1070,6 +1127,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         managed = CustomUser.objects.get(username='new-managed-teacher')
         self.assertTrue(check_password(
             response.context['issued_pin'], managed.pin_hash))
+        self.assertFalse(managed.has_usable_password())
         teacher_profile = managed.teacher
         response = self.client.get(reverse('manage_teachers'))
         self.assertContains(response, managed.username)
@@ -1094,6 +1152,27 @@ class TeacherRoleAndAttendanceTests(TestCase):
             response, reverse('manage_teachers'),
             fetch_redirect_response=False)
         self.assertFalse(CustomUser.objects.filter(pk=managed.pk).exists())
+
+    def test_adding_learner_does_not_require_address_or_profile_picture(self):
+        self.client.force_login(self.teacher)
+
+        response = self.client.post(reverse('add_student'), {
+            'first_name': 'No',
+            'last_name': 'Photo',
+            'username': 'no-photo-learner',
+            'gender': 'F',
+            'password': 'A-Unique-Strong-Password-289!',
+        })
+
+        self.assertRedirects(
+            response, reverse('manage_student'),
+            fetch_redirect_response=False)
+        learner = CustomUser.objects.get(username='no-photo-learner')
+        self.assertEqual(learner.address, '')
+        self.assertFalse(learner.profile_pic)
+        self.assertFalse(learner.pin_hash)
+        self.assertEqual(learner.student.teacher, self.teacher.teacher)
+        self.assertEqual(learner.student.created_by, self.teacher.teacher)
 
     def test_admin_and_teacher_pages_are_separated(self):
         self._set_up_class()
@@ -1120,7 +1199,6 @@ class TeacherRoleAndAttendanceTests(TestCase):
         teacher_forbidden = (
             'manage_teachers',
             'add_teacher',
-            'edit_subject',
             'view_student_leave',
             'student_feedback_message',
             'admin_notify_student',
@@ -1131,7 +1209,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         self.client.force_login(self.teacher)
         for page in teacher_forbidden:
             with self.subTest(role='teacher', page=page):
-                url = reverse(page, args=[self.subject.pk]) if page == 'edit_subject' else reverse(page)
+                url = reverse(page)
                 response = self.client.get(url)
                 self.assertRedirects(
                     response, reverse('teacher_home'),
@@ -1180,6 +1258,9 @@ class TeacherRoleAndAttendanceTests(TestCase):
             attendance__subject=self.subject,
             attendance__date='2026-05-10',
         )
+        self.assertEqual(
+            record.attendance.created_by, self.teacher.teacher)
+        self.assertEqual(record.created_by, self.teacher.teacher)
         self.assertFalse(record.status)
 
         response = self.client.post(reverse('generate_report'), {
@@ -1223,6 +1304,156 @@ class TeacherRoleAndAttendanceTests(TestCase):
         self.assertContains(response, 'Present')
         self.assertNotContains(
             response, '<span class="badge badge-danger">Absent</span>')
+
+    def test_admin_can_assign_learners_and_subjects_to_teachers(self):
+        self._set_up_class()
+        learner = CustomUser.objects.create_user(
+            username='unassigned-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        subject = Subject.objects.create(name='Unassigned Subject')
+        self.client.force_login(self.admin)
+
+        response = self.client.post(reverse('manage_assignments'), {
+            'assignment_type': 'learners',
+            'learners-learners': [learner.student.pk],
+            'learners-teacher': self.teacher.teacher.pk,
+        })
+        self.assertRedirects(
+            response, reverse('manage_assignments'),
+            fetch_redirect_response=False)
+        learner.student.refresh_from_db()
+        self.assertEqual(learner.student.teacher, self.teacher.teacher)
+        self.assertIsNone(learner.student.created_by)
+
+        response = self.client.post(reverse('manage_assignments'), {
+            'assignment_type': 'subjects',
+            'subjects-subjects': [subject.pk],
+            'subjects-teacher': self.teacher.teacher.pk,
+        })
+        self.assertRedirects(
+            response, reverse('manage_assignments'),
+            fetch_redirect_response=False)
+        subject.refresh_from_db()
+        self.assertEqual(subject.teacher, self.teacher.teacher)
+        self.assertIsNone(subject.created_by)
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse('add_subject'), {
+            'name': 'Teacher Created Subject',
+            'course': self.course.pk,
+        })
+        self.assertRedirects(
+            response, reverse('manage_subject'),
+            fetch_redirect_response=False)
+        created_subject = Subject.objects.get(name='Teacher Created Subject')
+        self.assertEqual(created_subject.teacher, self.teacher.teacher)
+        self.assertEqual(created_subject.created_by, self.teacher.teacher)
+
+    def test_teacher_cannot_access_another_teachers_learner_or_records(self):
+        self._set_up_class()
+        other_teacher = CustomUser.objects.create_user(
+            username='other-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='M',
+        )
+        learner = CustomUser.objects.create_user(
+            username='other-assigned-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        learner.student.course = self.course
+        learner.student.session = self.session
+        learner.student.teacher = other_teacher.teacher
+        learner.student.save()
+        subject = Subject.objects.create(
+            name='Other Teacher Subject',
+            course=self.course,
+            teacher=other_teacher.teacher,
+        )
+        result = StudentResult.objects.create(
+            student=learner.student, subject=subject, test=10, exam=20)
+        self.client.force_login(self.teacher)
+
+        response = self.client.get(reverse('manage_student'))
+        self.assertNotContains(response, learner.username)
+        self.assertEqual(response.status_code, 200)
+        for url_name, args in (
+            ('edit_student', [learner.student.pk]),
+            ('edit_student_result', [result.pk]),
+            ('delete_student_result', [result.pk]),
+            ('edit_subject', [subject.pk]),
+            ('delete_subject', [subject.pk]),
+        ):
+            with self.subTest(url_name=url_name):
+                response = self.client.get(reverse(url_name, args=args))
+                self.assertEqual(response.status_code, 404)
+
+        response = self.client.post(reverse('generate_report_card'), {
+            'student': learner.student.pk,
+            'session': self.session.pk,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.get('Content-Type'), 'application/pdf')
+
+    def test_deleting_teacher_preserves_learners_subjects_and_academic_records(self):
+        self._set_up_class()
+        learner = self._learner('preserved-learner@example.com', 'Preserved')
+        learner.student.created_by = self.teacher.teacher
+        learner.student.save()
+        result = StudentResult.objects.create(
+            student=learner.student,
+            subject=self.subject,
+            created_by=self.teacher.teacher,
+            test=20,
+            exam=70,
+        )
+        attendance = Attendance.objects.create(
+            course=self.course,
+            subject=self.subject,
+            session=self.session,
+            created_by=self.teacher.teacher,
+            date='2026-05-10',
+        )
+        attendance_report = AttendanceReport.objects.create(
+            attendance=attendance,
+            student=learner.student,
+            created_by=self.teacher.teacher,
+            status=True,
+        )
+
+        self.teacher.delete()
+
+        learner.student.refresh_from_db()
+        self.subject.refresh_from_db()
+        result.refresh_from_db()
+        attendance.refresh_from_db()
+        attendance_report.refresh_from_db()
+        self.assertIsNone(learner.student.teacher)
+        self.assertIsNone(learner.student.created_by)
+        self.assertTrue(Student.objects.filter(pk=learner.student.pk).exists())
+        self.assertIsNone(self.subject.teacher)
+        self.assertIsNone(self.subject.created_by)
+        self.assertTrue(Subject.objects.filter(pk=self.subject.pk).exists())
+        self.assertIsNone(result.created_by)
+        self.assertIsNone(attendance.created_by)
+        self.assertIsNone(attendance_report.created_by)
+
+    def test_grade_course_order_is_numeric(self):
+        names = [f'Grade {number}' for number in range(1, 11)]
+        for name in reversed(names):
+            Course.objects.create(name=name)
+
+        from .models import grade_ordered_courses
+
+        self.assertEqual(
+            list(grade_ordered_courses().values_list('name', flat=True)),
+            names,
+        )
 
     @staticmethod
     def _profile_image_upload():
@@ -1305,6 +1536,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         session = Session.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
         subject = Subject.objects.create(name='Mathematics', course=course)
+        learner.student.teacher = teacher.teacher
         learner.student.course = course
         learner.student.session = session
         learner.student.save()
@@ -1340,6 +1572,8 @@ class TeacherRoleAndAttendanceTests(TestCase):
             first_name='Alex',
             last_name='Learner',
         )
+        learner.student.teacher = teacher.teacher
+        learner.student.save()
         subject = Subject.objects.create(name='Mathematics')
         self.client.force_login(teacher)
 
@@ -1359,6 +1593,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
             student=learner.student, subject=subject)
         self.assertEqual(result.test, 18)
         self.assertEqual(result.exam, 72)
+        self.assertEqual(result.created_by, teacher.teacher)
 
         response = self.client.post(
             reverse('edit_student_result', args=[result.pk]),
@@ -1440,17 +1675,18 @@ class TeacherRoleAndAttendanceTests(TestCase):
             response, 'There is no data for the selected report options.')
 
     def test_admin_can_sign_in_through_admin_interface(self):
-        CustomUser.objects.create_user(
-            email='admin@example.com',
+        admin = CustomUser.objects.create_user(
+            username='admin-login-interface',
             password='valid-password',
             user_type=1,
             gender='F',
             address='',
         )
+        admin_pin = issue_pin(admin)
 
         response = self.client.post(reverse('user_login'), {
-            'username': 'admin@example.com',
-            'password': 'valid-password',
+            'username': admin.username,
+            'pin': admin_pin,
             'role': 'admin',
         })
 
@@ -1638,6 +1874,8 @@ class GradeBandAndReportCardTests(TestCase):
             gender='F',
             address='',
         )
+        learner.student.teacher = self.teacher.teacher
+        learner.student.save()
         subject = Subject.objects.create(name='Mathematics')
         StudentResult.objects.create(
             student=learner.student, subject=subject, test=20, exam=70)
@@ -1755,6 +1993,7 @@ class GradeBandAndReportCardTests(TestCase):
         )
         session = Session.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
+        learner.student.teacher = self.teacher.teacher
         learner.student.session = session
         learner.student.save()
 
@@ -1827,8 +2066,10 @@ class GradeBandAndReportCardTests(TestCase):
             start_year='2026-01-01', end_year='2026-12-31')
         learner.student.course = course
         learner.student.session = session
+        learner.student.teacher = self.teacher.teacher
         learner.student.save()
-        subject = Subject.objects.create(name=subject_name, course=course)
+        subject = Subject.objects.create(
+            name=subject_name, course=course, teacher=self.teacher.teacher)
         result = StudentResult.objects.create(
             student=learner.student, subject=subject, test=20, exam=70)
         return learner, session, subject, result
@@ -1857,54 +2098,29 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         data.update(kwargs)
         return data, course if hasattr(course, 'pk') else None
 
-    def _admin_registration_data(self, username='new-admin', **kwargs):
-        data = {
-            'first_name': 'Alex',
-            'last_name': 'Administrator',
-            'username': username,
-            'gender': 'M',
-            'password': 'A-Unique-Strong-Password-289!',
-            'confirm_password': 'A-Unique-Strong-Password-289!',
-            'registration_code': 'school-secret-code',
-        }
-        data.update(kwargs)
-        return data
-
-    def _teacher_registration_data(self, username='new-teacher', **kwargs):
-        data = {
-            'first_name': 'Sam',
-            'last_name': 'Teacher',
-            'username': username,
-            'gender': 'M',
-            'password': 'A-Unique-Strong-Password-289!',
-            'confirm_password': 'A-Unique-Strong-Password-289!',
-            'registration_code': 'teacher-secret-code',
-        }
-        data.update(kwargs)
-        return data
-
     def test_learner_registration_then_learner_sign_in(self):
         data, course = self._learner_registration_data()
 
-        response = self.client.post(reverse('register_role', args=['learner']), data)
+        response = self.client.post(
+            reverse('register_learner'), data, follow=True)
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'one-time PIN')
-        issued_pin = response.context['issued_pin']
+        self.assertContains(response, 'Registration complete')
         learner = CustomUser.objects.get(username='new-learner')
         self.assertEqual(learner.user_type, '2')
         self.assertEqual(learner.student.course, course)
         self.assertIsNone(learner.student.session)
+        self.assertIsNone(learner.student.teacher)
+        self.assertIsNone(learner.student.created_by)
+        self.assertFalse(learner.pin_hash)
         self.assertFalse(learner.profile_pic)
         self.assertTrue(learner.check_password(data['password']))
-        self.assertTrue(check_password(issued_pin, learner.pin_hash))
         self.assertFalse(learner.email)
         self.assertNotIn('_auth_user_id', self.client.session)
 
         response = self.client.post(reverse('user_login'), {
             'username': learner.username,
             'password': data['password'],
-            'pin': issued_pin,
             'role': 'learner',
         })
         self.assertRedirects(
@@ -1913,101 +2129,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             fetch_redirect_response=False,
         )
 
-    @override_settings(ADMIN_REGISTRATION_CODE='school-secret-code')
-    def test_administrator_registration_then_admin_sign_in(self):
-        data = self._admin_registration_data()
-
-        response = self.client.post(reverse('register_role', args=['admin']), data)
-
-        self.assertEqual(response.status_code, 200)
-        issued_pin = response.context['issued_pin']
-        admin = CustomUser.objects.get(username='new-admin')
-        self.assertEqual(admin.user_type, '1')
-        self.assertTrue(Admin.objects.filter(admin=admin).exists())
-        self.assertFalse(admin.profile_pic)
-        self.assertNotIn('_auth_user_id', self.client.session)
-
-        response = self.client.post(reverse('user_login'), {
-            'username': admin.username,
-            'password': data['password'],
-            'pin': issued_pin,
-            'role': 'admin',
-        })
-        self.assertRedirects(
-            response,
-            reverse('admin_home'),
-            fetch_redirect_response=False,
-        )
-
-    @override_settings(TEACHER_REGISTRATION_CODE='teacher-secret-code')
-    def test_teacher_registration_then_teacher_sign_in(self):
-        data = self._teacher_registration_data()
-        response = self.client.post(
-            reverse('register_role', args=['teacher']), data)
-        self.assertEqual(response.status_code, 200)
-        issued_pin = response.context['issued_pin']
-        teacher = CustomUser.objects.get(username=data['username'])
-        self.assertEqual(teacher.user_type, '3')
-        self.assertTrue(Teacher.objects.filter(teacher=teacher).exists())
-        self.assertFalse(teacher.profile_pic)
-        self.assertNotIn('_auth_user_id', self.client.session)
-
-        response = self.client.post(reverse('user_login'), {
-            'username': teacher.username,
-            'password': data['password'],
-            'pin': issued_pin,
-            'role': 'teacher',
-        })
-        self.assertRedirects(
-            response,
-            reverse('teacher_home'),
-            fetch_redirect_response=False,
-        )
-
-    def test_teacher_registration_rejects_wrong_or_unconfigured_code(self):
-        with override_settings(TEACHER_REGISTRATION_CODE='teacher-secret-code'):
-            response = self.client.post(
-                reverse('register_role', args=['teacher']),
-                self._teacher_registration_data(registration_code='wrong'),
-            )
-        self.assertContains(response, 'teacher registration code is incorrect')
-        self.assertFalse(CustomUser.objects.filter(
-            username='new-teacher').exists())
-
-        with override_settings(TEACHER_REGISTRATION_CODE=''):
-            response = self.client.post(
-                reverse('register_role', args=['teacher']),
-                self._teacher_registration_data(
-                    username='unconfigured-teacher'),
-            )
-        self.assertContains(response, 'no registration code is configured')
-        self.assertFalse(CustomUser.objects.filter(
-            username='unconfigured-teacher').exists())
-
-    def test_admin_registration_rejects_wrong_or_unconfigured_code(self):
-        with override_settings(ADMIN_REGISTRATION_CODE='school-secret-code'):
-            response = self.client.post(
-                reverse('register_role', args=['admin']),
-                self._admin_registration_data(
-                    registration_code='wrong-code'),
-            )
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'registration code is incorrect')
-        self.assertFalse(CustomUser.objects.filter(
-            username='new-admin').exists())
-
-        with override_settings(ADMIN_REGISTRATION_CODE=''):
-            response = self.client.post(
-                reverse('register_role', args=['admin']),
-                self._admin_registration_data(
-                    username='unconfigured-admin'),
-            )
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'no registration code is configured')
-        self.assertFalse(CustomUser.objects.filter(
-            username='unconfigured-admin').exists())
-
-    def test_duplicate_username_is_rejected_case_insensitively_across_all_roles(self):
+    def test_duplicate_learner_username_is_rejected_case_insensitively(self):
         CustomUser.objects.create_user(
             username='duplicate-user',
             password='valid-password',
@@ -2018,26 +2140,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         learner_data, _ = self._learner_registration_data(
             username='DUPLICATE-USER')
         response = self.client.post(
-            reverse('register_role', args=['learner']), learner_data)
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'already exists')
-
-        with override_settings(ADMIN_REGISTRATION_CODE='school-secret-code'):
-            response = self.client.post(
-                reverse('register_role', args=['admin']),
-                self._admin_registration_data(
-                    username='duplicate-user'),
-            )
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'already exists')
-        self.assertEqual(CustomUser.objects.filter(
-            username__iexact='duplicate-user').count(), 1)
-        with override_settings(TEACHER_REGISTRATION_CODE='teacher-secret-code'):
-            response = self.client.post(
-                reverse('register_role', args=['teacher']),
-                self._teacher_registration_data(
-                    username='DUPLICATE-USER'),
-            )
+            reverse('register_learner'), learner_data)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'already exists')
         self.assertEqual(CustomUser.objects.filter(
@@ -2047,7 +2150,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         data, _ = self._learner_registration_data(
             confirm_password='A-different-password-289!')
         response = self.client.post(
-            reverse('register_role', args=['learner']), data)
+            reverse('register_learner'), data)
         self.assertContains(response, 'Passwords do not match')
 
         data, _ = self._learner_registration_data(
@@ -2056,7 +2159,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             confirm_password='password',
         )
         response = self.client.post(
-            reverse('register_role', args=['learner']), data)
+            reverse('register_learner'), data)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'password')
         self.assertFalse(CustomUser.objects.filter(
@@ -2064,7 +2167,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
 
     def test_registration_shows_grade_choices_and_rejects_invalid_grade(self):
         grade = Course.objects.create(name='Grade 9')
-        response = self.client.get(reverse('register_role', args=['learner']))
+        response = self.client.get(reverse('register_learner'))
         self.assertContains(response, 'Grade 9')
         self.assertContains(response, 'Select a grade')
 
@@ -2073,7 +2176,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             course='999999',
         )
         response = self.client.post(
-            reverse('register_role', args=['learner']), data)
+            reverse('register_learner'), data)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'Select a valid choice')
         self.assertFalse(CustomUser.objects.filter(
@@ -2086,7 +2189,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             with self.subTest(username=username):
                 data, _ = self._learner_registration_data(username=username)
                 response = self.client.post(
-                    reverse('register_role', args=['learner']), data)
+                    reverse('register_learner'), data)
                 self.assertEqual(response.status_code, 200)
                 self.assertTrue(response.context['form'].errors.get('username'))
                 self.assertFalse(
@@ -2118,6 +2221,26 @@ class RegistrationAndRestrictedProfileTests(TestCase):
                 rows = csv_file.read().splitlines()
             self.assertEqual(rows[0], 'name,role,username')
             self.assertEqual(len(rows), 3)
+
+    def test_create_admin_command_creates_account_and_displays_pin_once(self):
+        with patch(
+            'builtins.input',
+            side_effect=['Alex', 'Administrator', 'new-admin', 'F'],
+        ):
+            output = StringIO()
+            call_command('create_admin', stdout=output)
+
+        admin = CustomUser.objects.get(username='new-admin')
+        self.assertEqual(admin.user_type, '1')
+        self.assertEqual(admin.first_name, 'Alex')
+        self.assertEqual(admin.last_name, 'Administrator')
+        self.assertTrue(Admin.objects.filter(admin=admin).exists())
+        self.assertFalse(admin.has_usable_password())
+        self.assertTrue(check_password(
+            output.getvalue().split('One-time PIN: ', 1)[1].strip(),
+            admin.pin_hash,
+        ))
+        self.assertEqual(output.getvalue().count('One-time PIN:'), 1)
 
     def test_legacy_email_sign_in_can_be_disabled(self):
         account = CustomUser.objects.create_user(
@@ -2155,7 +2278,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         self.assertNotIn('_auth_user_id', self.client.session)
 
     def test_learner_registration_requires_a_database_grade(self):
-        response = self.client.get(reverse('register_role', args=['learner']))
+        response = self.client.get(reverse('register_learner'))
 
         self.assertContains(
             response,
@@ -2170,7 +2293,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             'photo.jpg', b'this is not an image', content_type='image/jpeg')
 
         response = self.client.post(
-            reverse('register_role', args=['learner']),
+            reverse('register_learner'),
             data,
             format='multipart',
         )
@@ -2180,20 +2303,33 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         self.assertFalse(CustomUser.objects.filter(
             username='invalid-image').exists())
 
-    def test_registration_pages_link_back_to_matching_login(self):
-        for role in ('admin', 'learner'):
+    def test_staff_registration_urls_return_404(self):
+        for role in ('admin', 'teacher'):
             with self.subTest(role=role):
-                response = self.client.get(reverse('role_login', args=[role]))
-                self.assertContains(
-                    response,
-                    reverse('register_role', args=[role]),
-                )
+                response = self.client.get(f'/register/{role}/')
+                self.assertEqual(response.status_code, 404)
+
+    def test_staff_sign_in_pages_do_not_link_to_registration(self):
+        for role in ('admin', 'teacher'):
+            with self.subTest(role=role):
                 response = self.client.get(
-                    reverse('register_role', args=[role]))
-                self.assertContains(
-                    response,
-                    reverse('role_login', args=[role]),
-                )
+                    reverse('role_login', args=[role]))
+                self.assertEqual(response.status_code, 200)
+                self.assertNotContains(response, 'Register')
+                self.assertNotContains(response, '/register/')
+
+    def test_learner_sign_in_page_links_to_learner_registration(self):
+        response = self.client.get(
+            reverse('role_login', args=['learner']))
+        self.assertContains(response, "Don't have an account? Register")
+        self.assertContains(response, reverse('register_learner'))
+
+        response = self.client.get(reverse('register_learner'))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            reverse('role_login', args=['learner']),
+        )
 
     def test_signed_in_user_is_redirected_from_registration(self):
         admin = CustomUser.objects.create_user(
@@ -2205,7 +2341,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         )
         self.client.force_login(admin)
 
-        response = self.client.get(reverse('register_role', args=['learner']))
+        response = self.client.get(reverse('register_learner'))
 
         self.assertRedirects(
             response,
@@ -2217,11 +2353,10 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         learner_data, _ = self._learner_registration_data(
             username='role-check-learner')
         learner_registration = self.client.post(
-            reverse('register_role', args=['learner']), learner_data)
+            reverse('register_learner'), learner_data)
         response = self.client.post(reverse('user_login'), {
             'username': learner_data['username'],
             'password': learner_data['password'],
-            'pin': learner_registration.context['issued_pin'],
             'role': 'admin',
         })
         self.assertRedirects(
@@ -2231,15 +2366,17 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         )
         self.assertNotIn('_auth_user_id', self.client.session)
 
-        with override_settings(ADMIN_REGISTRATION_CODE='school-secret-code'):
-            admin_data = self._admin_registration_data(
-                username='role-check-admin')
-            admin_registration = self.client.post(
-                reverse('register_role', args=['admin']), admin_data)
+        admin = CustomUser.objects.create_user(
+            username='role-check-admin',
+            password='A-Unique-Strong-Password-289!',
+            user_type='1',
+            gender='M',
+        )
+        admin_pin = issue_pin(admin)
         response = self.client.post(reverse('user_login'), {
-            'username': admin_data['username'],
-            'password': admin_data['password'],
-            'pin': admin_registration.context['issued_pin'],
+            'username': admin.username,
+            'password': 'A-Unique-Strong-Password-289!',
+            'pin': admin_pin,
             'role': 'learner',
         })
         self.assertRedirects(
@@ -2448,33 +2585,40 @@ class PINAndLockoutTests(TestCase):
     def setUp(self):
         cache.clear()
         self.user = CustomUser.objects.create_user(
-            username='pin-user',
+            username='pin-teacher',
+            password='A-Strong-Password-283!',
+            user_type='3',
+            gender='F',
+            first_name='PIN',
+            last_name='Teacher',
+        )
+        self.legacy_learner = CustomUser.objects.create_user(
+            username='legacy-learner-pin',
             password='A-Strong-Password-283!',
             user_type='2',
             gender='F',
-            first_name='PIN',
-            last_name='Learner',
         )
+        issue_pin(self.legacy_learner)
         self.pin = issue_pin(self.user)
 
     def _sign_in(self, **overrides):
         data = {
             'username': self.user.username,
-            'password': 'A-Strong-Password-283!',
             'pin': self.pin,
-            'role': 'learner',
+            'role': 'teacher',
         }
         data.update(overrides)
         return self.client.post(reverse('user_login'), data)
 
-    def test_pin_is_hashed_and_required_for_accounts_that_have_one(self):
+    def test_staff_sign_in_uses_a_hashed_pin_without_a_password(self):
         self.user.refresh_from_db()
         self.assertNotEqual(self.user.pin_hash, self.pin)
         self.assertTrue(check_password(self.pin, self.user.pin_hash))
+        self.assertFalse(self.user.has_usable_password())
         response = self._sign_in(pin='')
         self.assertRedirects(
             response,
-            reverse('role_login', args=['learner']),
+            reverse('role_login', args=['teacher']),
             fetch_redirect_response=False,
         )
         self.assertNotIn('_auth_user_id', self.client.session)
@@ -2482,7 +2626,7 @@ class PINAndLockoutTests(TestCase):
         response = self._sign_in()
         self.assertRedirects(
             response,
-            reverse('student_home'),
+            reverse('teacher_home'),
             fetch_redirect_response=False,
         )
         self.user.refresh_from_db()
@@ -2492,22 +2636,20 @@ class PINAndLockoutTests(TestCase):
     def test_pin_generator_rejects_weak_values(self):
         with patch(
             'main_app.credentials.secrets.randbelow',
-            side_effect=[0, 11111, 12345, 54321, 999, 24680],
+            side_effect=[0, 11111, 12345, 54321, 22222, 14256],
         ):
-            self.assertEqual(generate_pin(), '24680')
+            self.assertEqual(generate_pin(), '14256')
 
     def test_all_sign_in_failures_use_the_same_generic_error(self):
         attempts = (
-            ('missing-user', 'A-Strong-Password-283!', self.pin, 'learner'),
-            (self.user.username, 'wrong-password', self.pin, 'learner'),
-            (self.user.username, 'A-Strong-Password-283!', '24680', 'learner'),
-            (self.user.username, 'A-Strong-Password-283!', self.pin, 'admin'),
+            ('missing-user', self.pin, 'teacher'),
+            (self.user.username, '24680', 'teacher'),
+            (self.user.username, self.pin, 'admin'),
         )
-        for username, password, pin, role in attempts:
+        for username, pin, role in attempts:
             with self.subTest(username=username, role=role, pin=pin):
                 response = self.client.post(reverse('user_login'), {
                     'username': username,
-                    'password': password,
                     'pin': pin,
                     'role': role,
                 })
@@ -2527,7 +2669,7 @@ class PINAndLockoutTests(TestCase):
     )
     def test_five_failed_attempts_lock_the_account_and_success_unlocks_it(self):
         for _ in range(5):
-            self._sign_in(password='incorrect-password')
+            self._sign_in(pin='24680')
 
         self.user.refresh_from_db()
         self.assertEqual(self.user.failed_login_attempts, 5)
@@ -2536,7 +2678,7 @@ class PINAndLockoutTests(TestCase):
         response = self._sign_in()
         self.assertRedirects(
             response,
-            reverse('role_login', args=['learner']),
+            reverse('role_login', args=['teacher']),
             fetch_redirect_response=False,
         )
         self.assertNotIn('_auth_user_id', self.client.session)
@@ -2546,7 +2688,7 @@ class PINAndLockoutTests(TestCase):
         response = self._sign_in()
         self.assertRedirects(
             response,
-            reverse('student_home'),
+            reverse('teacher_home'),
             fetch_redirect_response=False,
         )
         self.user.refresh_from_db()
@@ -2555,41 +2697,39 @@ class PINAndLockoutTests(TestCase):
 
     @override_settings(SIMS_LOGIN_IP_MAX_FAILURES=2)
     def test_ip_failure_limit_blocks_a_later_correct_sign_in(self):
-        self._sign_in(password='incorrect-password')
+        self._sign_in(pin='24680')
         self._sign_in(pin='24680')
         response = self._sign_in()
 
         self.assertRedirects(
             response,
-            reverse('role_login', args=['learner']),
+            reverse('role_login', args=['teacher']),
             fetch_redirect_response=False,
         )
-        error_page = self.client.get(reverse('role_login', args=['learner']))
+        error_page = self.client.get(reverse('role_login', args=['teacher']))
         self.assertContains(error_page, 'Invalid sign-in details')
         self.assertNotIn('_auth_user_id', self.client.session)
         self.user.refresh_from_db()
         self.assertEqual(self.user.failed_login_attempts, 2)
 
-    @override_settings(SIMS_PIN_ENFORCED=True)
-    def test_missing_pin_is_refused_with_the_generic_error_when_enforced(self):
+    def test_staff_without_a_pin_cannot_sign_in(self):
         account = CustomUser.objects.create_user(
             username='unissued-pin',
-            password='A-Strong-Password-283!',
-            user_type='2',
+            password=None,
+            user_type='3',
             gender='F',
         )
         response = self.client.post(reverse('user_login'), {
             'username': account.username,
-            'password': 'A-Strong-Password-283!',
             'pin': '',
-            'role': 'learner',
+            'role': 'teacher',
         })
         self.assertRedirects(
             response,
-            reverse('role_login', args=['learner']),
+            reverse('role_login', args=['teacher']),
             fetch_redirect_response=False,
         )
-        error_page = self.client.get(reverse('role_login', args=['learner']))
+        error_page = self.client.get(reverse('role_login', args=['teacher']))
         self.assertContains(error_page, 'Invalid sign-in details')
 
     def test_issue_pins_command_creates_hashes_and_one_time_csv(self):
@@ -2610,13 +2750,16 @@ class PINAndLockoutTests(TestCase):
             with open(csv_path, newline='', encoding='utf-8') as csv_file:
                 rows = list(csv.reader(csv_file))
             self.assertEqual(rows[0], ['name', 'role', 'username', 'PIN'])
-            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(rows), 3)
             self.assertIn('delete the CSV', output.getvalue())
             self.assertNotIn(self.pin, output.getvalue())
 
         second.refresh_from_db()
         self.assertTrue(second.pin_hash)
-        self.assertTrue(check_password(rows[1][3], second.pin_hash))
+        self.assertFalse(second.has_usable_password())
+        self.assertTrue(check_password(rows[2][3], second.pin_hash))
+        self.legacy_learner.refresh_from_db()
+        self.assertFalse(self.legacy_learner.pin_hash)
 
 
 @override_settings(PASSWORD_HASHERS=[
@@ -2646,40 +2789,34 @@ class CredentialResetTests(TestCase):
             first_name='Casey',
             last_name='Learner',
         )
+        self.learner.student.teacher = self.teacher.teacher
+        self.learner.student.save()
+        self.admin_pin = issue_pin(self.admin)
         self.teacher_pin = issue_pin(self.teacher)
-        self.learner_pin = issue_pin(self.learner)
 
     def _reset_url(self, user):
         return reverse('reset_user_credentials', args=[user.pk])
 
-    def test_administrator_can_reset_learner_and_teacher_passwords(self):
+    def test_administrator_can_reset_learner_password(self):
         self.client.force_login(self.admin)
         new_password = 'Different-Strong-Password-932!'
-        for account in (self.learner, self.teacher):
-            with self.subTest(account=account.username):
-                account.failed_login_attempts = 4
-                account.locked_until = timezone.now() + timedelta(minutes=15)
-                original_pin_hash = account.pin_hash
-                account.save(update_fields=[
-                    'failed_login_attempts',
-                    'locked_until',
-                ])
-                response = self.client.post(self._reset_url(account), {
-                    'action': 'password',
-                    'new_password': new_password,
-                    'confirm_password': new_password,
-                })
-                self.assertEqual(response.status_code, 200)
-                self.assertContains(response, new_password)
-                account.refresh_from_db()
-                self.assertTrue(account.check_password(new_password))
-                self.assertEqual(account.pin_hash, original_pin_hash)
-                self.assertEqual(account.failed_login_attempts, 0)
-                self.assertIsNone(account.locked_until)
+        self.learner.failed_login_attempts = 4
+        self.learner.locked_until = timezone.now() + timedelta(minutes=15)
+        response = self.client.post(self._reset_url(self.learner), {
+            'action': 'password',
+            'new_password': new_password,
+            'confirm_password': new_password,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, new_password)
+        self.learner.refresh_from_db()
+        self.assertTrue(self.learner.check_password(new_password))
+        self.assertEqual(self.learner.failed_login_attempts, 0)
+        self.assertIsNone(self.learner.locked_until)
+        self.assertFalse(self.teacher.has_usable_password())
 
     def test_administrator_and_teacher_can_reset_allowed_pins(self):
         self.client.force_login(self.admin)
-        previous_password = 'Original-Teacher-Password-381!'
         response = self.client.post(self._reset_url(self.teacher), {
             'action': 'pin',
         })
@@ -2688,17 +2825,19 @@ class CredentialResetTests(TestCase):
         self.teacher.refresh_from_db()
         self.assertNotEqual(new_teacher_pin, self.teacher_pin)
         self.assertTrue(check_password(new_teacher_pin, self.teacher.pin_hash))
-        self.assertTrue(self.teacher.check_password(previous_password))
+        self.assertFalse(self.teacher.has_usable_password())
 
         self.client.force_login(self.teacher)
         response = self.client.post(self._reset_url(self.learner), {
-            'action': 'pin',
+            'action': 'password',
+            'new_password': 'Different-Learner-Password-932!',
+            'confirm_password': 'Different-Learner-Password-932!',
         })
         self.assertEqual(response.status_code, 200)
-        new_learner_pin = response.context['secret']
         self.learner.refresh_from_db()
-        self.assertNotEqual(new_learner_pin, self.learner_pin)
-        self.assertTrue(check_password(new_learner_pin, self.learner.pin_hash))
+        self.assertTrue(self.learner.check_password(
+            'Different-Learner-Password-932!'))
+        self.assertFalse(self.learner.pin_hash)
 
     def test_teacher_cannot_reset_teacher_or_administrator(self):
         self.client.force_login(self.teacher)
@@ -2706,41 +2845,45 @@ class CredentialResetTests(TestCase):
         self.assertEqual(response.status_code, 403)
         response = self.client.get(self._reset_url(self.admin))
         self.assertEqual(response.status_code, 404)
+        unassigned_learner = CustomUser.objects.create_user(
+            username='unassigned-reset-target',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        response = self.client.get(self._reset_url(unassigned_learner))
+        self.assertEqual(response.status_code, 404)
 
-    def test_signed_in_user_can_reset_own_pin_with_current_password_and_pin(self):
+    def test_learner_can_change_password_without_a_pin(self):
         self.client.force_login(self.learner)
         response = self.client.post(reverse('student_view_profile'), {
             'first_name': self.learner.first_name,
             'last_name': self.learner.last_name,
             'current_password': 'Original-Learner-Password-381!',
-            'current_pin': self.learner_pin,
-            'reset_pin': 'on',
+            'new_password': 'Changed-Learner-Password-853!',
+            'confirm_password': 'Changed-Learner-Password-853!',
         })
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'New PIN')
-        new_pin = response.context['issued_pin']
+        self.assertRedirects(
+            response, reverse('student_view_profile'),
+            fetch_redirect_response=False)
         self.learner.refresh_from_db()
-        self.assertNotEqual(new_pin, self.learner_pin)
-        self.assertTrue(check_password(new_pin, self.learner.pin_hash))
         self.assertTrue(
-            self.learner.check_password('Original-Learner-Password-381!'))
+            self.learner.check_password('Changed-Learner-Password-853!'))
         self.assertEqual(self.client.get(
             reverse('student_view_profile')).status_code, 200)
 
-    def test_self_pin_reset_rejects_wrong_current_pin(self):
-        self.client.force_login(self.learner)
-        old_pin_hash = self.learner.pin_hash
-        response = self.client.post(reverse('student_view_profile'), {
-            'first_name': self.learner.first_name,
-            'last_name': self.learner.last_name,
-            'current_password': 'Original-Learner-Password-381!',
-            'current_pin': '24680',
+    def test_teacher_can_reset_own_pin_with_the_current_pin(self):
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse('teacher_profile'), {
+            'first_name': self.teacher.first_name,
+            'last_name': self.teacher.last_name,
+            'current_pin': self.teacher_pin,
             'reset_pin': 'on',
         })
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'Current PIN is incorrect')
-        self.learner.refresh_from_db()
-        self.assertEqual(self.learner.pin_hash, old_pin_hash)
+        self.assertIn('issued_pin', response.context)
+        self.teacher.refresh_from_db()
+        self.assertFalse(self.teacher.has_usable_password())
 
     def test_admin_password_and_pin_have_no_web_reset_page(self):
         self.client.force_login(self.admin)
@@ -2773,17 +2916,24 @@ class CredentialResetTests(TestCase):
         self.assertNotContains(response, 'password_reset')
         self.assertContains(
             response,
-            'Forgot your password or PIN? Ask your teacher or administrator to reset it.')
+            'Forgot your password? Ask your teacher or administrator to reset it.')
 
     def test_operator_commands_reset_admin_credentials_without_crossing_them(self):
-        self.admin.failed_login_attempts = 4
-        self.admin.locked_until = timezone.now() + timedelta(minutes=15)
-        original_pin_hash = self.admin.pin_hash
-        self.admin.save(update_fields=[
-            'failed_login_attempts',
-            'locked_until',
-        ])
+        from django.core.management.base import CommandError
 
+        with self.assertRaises(CommandError):
+            call_command(
+                'set_admin_password',
+                self.admin.username,
+                stdout=StringIO(),
+            )
+
+        django_superuser = CustomUser.objects.create_superuser(
+            username='django-superuser',
+            password='Original-Superuser-Password-923!',
+            user_type='1',
+            gender='M',
+        )
         with patch(
             'getpass.getpass',
             side_effect=[
@@ -2794,14 +2944,12 @@ class CredentialResetTests(TestCase):
             output = StringIO()
             call_command(
                 'set_admin_password',
-                self.admin.username,
+                django_superuser.username,
                 stdout=output,
             )
-        self.admin.refresh_from_db()
-        self.assertTrue(self.admin.check_password('New-Operator-Password-625!'))
-        self.assertEqual(self.admin.pin_hash, original_pin_hash)
-        self.assertEqual(self.admin.failed_login_attempts, 0)
-        self.assertIsNone(self.admin.locked_until)
+        django_superuser.refresh_from_db()
+        self.assertTrue(django_superuser.check_password(
+            'New-Operator-Password-625!'))
         self.assertNotIn('New-Operator-Password-625!', output.getvalue())
 
         output = StringIO()
@@ -2813,4 +2961,152 @@ class CredentialResetTests(TestCase):
         admin_pin = output.getvalue().strip().split(': ')[-1]
         self.admin.refresh_from_db()
         self.assertTrue(check_password(admin_pin, self.admin.pin_hash))
-        self.assertTrue(self.admin.check_password('New-Operator-Password-625!'))
+        self.assertFalse(self.admin.has_usable_password())
+
+
+class ActivityLogTests(TestCase):
+    def setUp(self):
+        self.admin = CustomUser.objects.create_user(
+            username='activity-admin',
+            password='Valid-Admin-Password-389!',
+            user_type='1',
+            gender='F',
+        )
+
+    def test_model_changes_include_actor_and_assignment_values_without_secrets(self):
+        request = RequestFactory().post('/admin/assignments/')
+        request.user = self.admin
+        token = set_current_request(request)
+        try:
+            teacher_user = CustomUser.objects.create_user(
+                username='activity-teacher',
+                password='Never-Log-This-Password-391!',
+                user_type='3',
+                gender='M',
+                first_name='Casey',
+                last_name='Teacher',
+            )
+            teacher_pin = issue_pin(teacher_user)
+            learner_user = CustomUser.objects.create_user(
+                username='activity-learner',
+                password='Never-Log-Learner-Password-392!',
+                user_type='2',
+                gender='F',
+            )
+            learner = learner_user.student
+            learner.teacher = teacher_user.teacher
+            learner.save(update_fields=['teacher', 'updated_at'])
+        finally:
+            reset_current_request(token)
+
+        assignment = ActivityLog.objects.filter(
+            object_type='main_app.student',
+            object_id=str(learner.pk),
+            action='update',
+        ).latest('created_at')
+        self.assertEqual(assignment.actor_id, self.admin.pk)
+        self.assertEqual(assignment.target_user_id, learner_user.pk)
+        self.assertIsNone(assignment.changes['teacher']['old'])
+        self.assertIn(
+            'Casey Teacher', assignment.changes['teacher']['new'])
+
+        user_events = ActivityLog.objects.filter(
+            object_type='main_app.customuser',
+            object_id=str(teacher_user.pk),
+        )
+        serialized = ' '.join(str(event.changes) for event in user_events)
+        self.assertNotIn('Never-Log-This-Password-391!', serialized)
+        self.assertNotIn(teacher_pin, serialized)
+        self.assertIn('[redacted]', serialized)
+
+    def test_admin_can_filter_export_and_view_a_user_timeline(self):
+        learner = CustomUser.objects.create_user(
+            username='activity-target',
+            password='Valid-Learner-Password-391!',
+            user_type='2',
+            gender='F',
+        )
+        event = ActivityLog.objects.create(
+            actor=self.admin,
+            actor_username=self.admin.username,
+            target_user=learner,
+            action='update',
+            object_type='main_app.student',
+            object_id=str(learner.student.pk),
+            description='Updated activity target learner',
+            changes={'teacher': {'old': None, 'new': 'Assigned Teacher'}},
+        )
+        self.client.force_login(self.admin)
+        response = self.client.get(
+            reverse('activity_log'),
+            {'search': 'activity target', 'action': 'update'},
+        )
+        self.assertContains(response, event.description)
+
+        response = self.client.get(
+            reverse('activity_log'), {'action': 'update', 'export': 'csv'})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('text/csv', response['Content-Type'])
+        self.assertContains(response, 'Updated activity target learner')
+
+        response = self.client.get(
+            reverse('activity_user_timeline', args=[learner.pk]))
+        self.assertContains(response, event.description)
+
+        teacher = CustomUser.objects.create_user(
+            username='activity-nonadmin',
+            password='Valid-Teacher-Password-391!',
+            user_type='3',
+            gender='M',
+        )
+        self.client.force_login(teacher)
+        response = self.client.get(reverse('activity_log'))
+        self.assertRedirects(
+            response, reverse('teacher_home'),
+            fetch_redirect_response=False)
+
+    def test_deleting_target_account_keeps_a_valid_user_snapshot(self):
+        learner = CustomUser.objects.create_user(
+            username='activity-deleted-target',
+            password='Valid-Learner-Password-392!',
+            user_type='2',
+            gender='F',
+        )
+        learner_id = str(learner.pk)
+        learner.delete()
+
+        deletion_events = ActivityLog.objects.filter(
+            target_user_id_snapshot=learner_id,
+            action='delete',
+        )
+        self.assertGreaterEqual(deletion_events.count(), 2)
+        self.assertTrue(all(
+            event.target_user_id is None
+            for event in deletion_events
+        ))
+        self.assertTrue(all(
+            event.target_username == 'activity-deleted-target'
+            for event in deletion_events
+        ))
+
+    @override_settings(SIMS_ACTIVITY_LOG_RETENTION_DAYS=30)
+    def test_retention_command_removes_only_entries_past_the_cutoff(self):
+        old_entry = ActivityLog.objects.create(
+            actor_username='old-user',
+            action='delete',
+            object_type='main_app.student',
+            description='Old entry',
+        )
+        recent_entry = ActivityLog.objects.create(
+            actor_username='recent-user',
+            action='create',
+            object_type='main_app.student',
+            description='Recent entry',
+        )
+        ActivityLog.objects.filter(pk=old_entry.pk).update(
+            created_at=timezone.now() - timedelta(days=31))
+
+        call_command('prune_activity_log', stdout=StringIO())
+
+        self.assertFalse(ActivityLog.objects.filter(pk=old_entry.pk).exists())
+        self.assertTrue(ActivityLog.objects.filter(pk=recent_entry.pk).exists())

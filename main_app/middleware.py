@@ -2,11 +2,13 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils.deprecation import MiddlewareMixin
 
+from .activity import reset_current_request, set_current_request
+
 
 PUBLIC_URLS = {
     'login_page',
     'role_login',
-    'register_role',
+    'register_learner',
     'user_login',
     'favicon',
     'serve',
@@ -16,16 +18,16 @@ PUBLIC_URLS = {
 ADMIN_ONLY_URLS = {
     'admin_home',
     'learner_login_activity',
+    'activity_log',
+    'activity_user_timeline',
     'admin_attendance_records',
-    'add_subject',
-    'edit_subject',
-    'delete_subject',
     'student_feedback_message',
     'view_student_leave',
     'admin_view_profile',
     'admin_notify_student',
     'send_student_notification',
     'manage_teachers',
+    'manage_assignments',
     'add_teacher',
     'edit_teacher',
     'delete_teacher',
@@ -49,6 +51,9 @@ SHARED_STAFF_URLS = {
     'edit_student',
     'delete_student',
     'manage_subject',
+    'add_subject',
+    'edit_subject',
+    'delete_subject',
     'generate_report',
     'reset_user_credentials',
 }
@@ -94,3 +99,15 @@ class LoginCheckMiddleWare(MiddlewareMixin):
             return redirect(reverse(self.dashboard_for(user)))
 
         return None
+
+
+class ActivityRequestMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        token = set_current_request(request)
+        try:
+            return self.get_response(request)
+        finally:
+            reset_current_request(token)

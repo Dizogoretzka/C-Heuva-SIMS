@@ -6,9 +6,21 @@
         <div class="card">
             <div class="card-header"><h3 class="card-title">Recorded attendance (read-only)</h3></div>
             <div class="card-body table-responsive">
+                <form method="get" class="form-row align-items-end mb-3">
+                    {% for field in filter_form %}
+                    <div class="form-group col-md-4">
+                        {{ field.label_tag }}
+                        {{ field }}
+                    </div>
+                    {% endfor %}
+                    <div class="form-group col-md-4">
+                        <button type="submit" class="btn btn-secondary">Filter</button>
+                        <a href="{% url 'admin_attendance_records' %}" class="btn btn-light">Clear</a>
+                    </div>
+                </form>
                 <table class="table table-bordered table-hover">
                     <thead>
-                        <tr><th>Date</th><th>Course / grade</th><th>Subject</th><th>Session / term</th><th>Present</th><th>Absent</th></tr>
+                        <tr><th>Date</th><th>Course / grade</th><th>Subject</th><th>Subject teacher</th><th>Recorded by</th><th>Session / term</th><th>Present</th><th>Absent</th></tr>
                     </thead>
                     <tbody>
                         {% for record in page_obj %}
@@ -16,12 +28,14 @@
                             <td>{{ record.date }}</td>
                             <td>{{ record.course }}</td>
                             <td>{{ record.subject }}</td>
+                            <td>{% if record.subject.teacher %}{{ record.subject.teacher }}{% else %}School-wide{% endif %}</td>
+                            <td>{% if record.created_by %}{{ record.created_by }}{% else %}Administrator / legacy{% endif %}</td>
                             <td>{{ record.session }}</td>
                             <td>{{ record.present_count }}</td>
                             <td>{{ record.absent_count }}</td>
                         </tr>
                         {% empty %}
-                        <tr><td colspan="6" class="text-center">No attendance has been recorded.</td></tr>
+                        <tr><td colspan="8" class="text-center">No attendance has been recorded.</td></tr>
                         {% endfor %}
                     </tbody>
                 </table>

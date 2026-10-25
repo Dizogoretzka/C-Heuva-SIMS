@@ -1,5 +1,6 @@
 import json
 import logging
+import csv
 from datetime import date
 from io import BytesIO
 from pathlib import Path
@@ -31,6 +32,13 @@ from .forms import *
 from .credentials import issue_pin
 from .grading import get_grade_band
 from .models import *
+from .scoping import (
+    teacher_profile,
+    visible_attendance,
+    visible_results,
+    visible_students,
+    visible_subjects,
+)
 from .views import render_pin_confirmation, update_profile_from_form
 
 logger = logging.getLogger(__name__)
@@ -91,6 +99,87 @@ def learner_login_activity(request):
     return render(request, 'hod_template/learner_login_activity.html', context)
 
 
+@login_required
+def activity_log(request, user_id=None):
+    target_user = None
+    activities = ActivityLog.objects.select_related('actor', 'target_user')
+    if user_id is not None:
+        target_user = get_object_or_404(CustomUser, pk=user_id)
+        activities = activities.filter(
+            Q(target_user=target_user)
+            | Q(target_user_id_snapshot=str(target_user.pk))
+            | Q(actor=target_user))
+
+    filter_form = ActivityLogFilterForm(request.GET)
+    filter_valid = filter_form.is_valid()
+    if filter_valid:
+        search = filter_form.cleaned_data['search']
+        action = filter_form.cleaned_data['action']
+        start_date = filter_form.cleaned_data['start_date']
+        end_date = filter_form.cleaned_data['end_date']
+        if search:
+            activities = activities.filter(
+                Q(actor_username__icontains=search)
+                | Q(description__icontains=search)
+                | Q(object_type__icontains=search)
+                | Q(target_username__icontains=search)
+                | Q(target_user__username__icontains=search)
+            )
+        if action:
+            activities = activities.filter(action=action)
+        if start_date:
+            activities = activities.filter(created_at__date__gte=start_date)
+        if end_date:
+            activities = activities.filter(created_at__date__lte=end_date)
+    activities = activities.order_by('-created_at', '-pk')
+
+    if request.GET.get('export') == 'csv' and not filter_valid:
+        return HttpResponse(
+            'Invalid activity-log filters.', status=400,
+            content_type='text/plain',
+        )
+
+    if request.GET.get('export') == 'csv':
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = (
+            'attachment; filename="sims-activity-log.csv"')
+        writer = csv.writer(response)
+        writer.writerow([
+            'Timestamp', 'Actor', 'Action', 'Record type', 'Record ID',
+            'Target user', 'Target user ID', 'Description', 'Changes',
+            'IP address',
+        ])
+        for item in activities.iterator():
+            writer.writerow([
+                item.created_at.isoformat(),
+                item.actor_username,
+                item.get_action_display(),
+                item.object_type,
+                item.object_id,
+                item.target_username,
+                item.target_user_id_snapshot,
+                item.description,
+                json.dumps(item.changes, sort_keys=True),
+                item.ip_address or '',
+            ])
+        return response
+
+    paginator = Paginator(activities, 50)
+    page_obj = paginator.get_page(request.GET.get('page'))
+    query_params = request.GET.copy()
+    query_params.pop('page', None)
+    query_params.pop('export', None)
+    return render(request, 'hod_template/activity_log.html', {
+        'page_title': (
+            f'Activity Timeline: {target_user.get_username()}'
+            if target_user else 'Activity Log'),
+        'filter_form': filter_form,
+        'page_obj': page_obj,
+        'query_params': query_params.urlencode(),
+        'target_user': target_user,
+    })
+
+
 def manage_teachers(request):
     teachers = Teacher.objects.select_related('teacher').order_by(
         'teacher__last_name', 'teacher__first_name')
@@ -101,16 +190,94 @@ def manage_teachers(request):
 
 
 @login_required
+def manage_assignments(request):
+    filter_form = TeacherGradeFilterForm(request.GET)
+    learner_form = LearnerAssignmentForm(prefix='learners')
+    subject_form = SubjectAssignmentForm(prefix='subjects')
+    unassigned_learners = visible_students(request.user).filter(
+        teacher__isnull=True)
+    unassigned_subjects = visible_subjects(request.user).filter(
+        teacher__isnull=True)
+    if request.user.user_type == '1' and filter_form.is_valid():
+        course = filter_form.cleaned_data['course']
+        current_teacher = filter_form.cleaned_data['teacher']
+        if course:
+            unassigned_learners = unassigned_learners.filter(course=course)
+            unassigned_subjects = unassigned_subjects.filter(
+                Q(course=course) | Q(course__isnull=True))
+            learner_form.fields['learners'].queryset = (
+                learner_form.fields['learners'].queryset.filter(course=course))
+            subject_form.fields['subjects'].queryset = (
+                subject_form.fields['subjects'].queryset.filter(
+                    Q(course=course) | Q(course__isnull=True)))
+        if current_teacher:
+            learner_form.fields['learners'].queryset = (
+                learner_form.fields['learners'].queryset.filter(
+                    teacher=current_teacher))
+            subject_form.fields['subjects'].queryset = (
+                subject_form.fields['subjects'].queryset.filter(
+                    teacher=current_teacher))
+    if request.method == 'POST':
+        form_type = request.POST.get('assignment_type')
+        if form_type == 'learners':
+            learner_form = LearnerAssignmentForm(
+                request.POST, prefix='learners')
+            if learner_form.is_valid():
+                assigned_teacher = learner_form.cleaned_data['teacher']
+                with transaction.atomic():
+                    for learner in learner_form.cleaned_data['learners']:
+                        if learner.teacher_id != getattr(
+                                assigned_teacher, 'pk', None):
+                            learner.teacher = assigned_teacher
+                            learner.save(update_fields=['teacher', 'updated_at'])
+                messages.success(request, 'Learner assignments updated.')
+                return redirect(reverse('manage_assignments'))
+        elif form_type == 'subjects':
+            subject_form = SubjectAssignmentForm(
+                request.POST, prefix='subjects')
+            if subject_form.is_valid():
+                assigned_teacher = subject_form.cleaned_data['teacher']
+                with transaction.atomic():
+                    for subject in subject_form.cleaned_data['subjects']:
+                        if subject.teacher_id != getattr(
+                                assigned_teacher, 'pk', None):
+                            subject.teacher = assigned_teacher
+                            subject.save(update_fields=['teacher', 'updated_at'])
+                messages.success(request, 'Subject assignments updated.')
+                return redirect(reverse('manage_assignments'))
+
+    return render(request, 'hod_template/manage_assignments.html', {
+        'learner_form': learner_form,
+        'subject_form': subject_form,
+        'filter_form': filter_form,
+        'unassigned_learners': unassigned_learners,
+        'unassigned_subjects': unassigned_subjects,
+        'page_title': 'Manage Teacher Assignments',
+    })
+
+
+@login_required
 def reset_user_credentials(request, user_id):
-    account = get_object_or_404(
-        CustomUser.objects.filter(user_type__in=('2', '3')),
-        pk=user_id,
-    )
     if request.user.user_type == '1':
-        allowed = account.user_type in ('2', '3')
+        account = get_object_or_404(
+            CustomUser.objects.filter(user_type__in=('2', '3')),
+            pk=user_id,
+        )
+        allowed = True
     elif request.user.user_type == '3':
-        allowed = account.user_type == '2'
+        account = CustomUser.objects.filter(
+            user_type='2',
+            student__teacher__teacher=request.user,
+            pk=user_id,
+        ).first()
+        if account:
+            allowed = True
+        else:
+            account = get_object_or_404(
+                CustomUser.objects.filter(user_type='3'), pk=user_id)
+            allowed = False
     else:
+        account = get_object_or_404(CustomUser, pk=user_id)
         allowed = False
     if not allowed:
         return HttpResponseForbidden()
@@ -163,7 +330,7 @@ def add_teacher(request):
             user = CustomUser.objects.create_user(
                 username=data['username'],
                 email='',
-                password=data['password'],
+                password=None,
                 user_type='3',
                 first_name=data['first_name'],
                 last_name=data['last_name'],
@@ -202,10 +369,6 @@ def edit_teacher(request, teacher_id):
         user.gender = data['gender']
         if data.get('profile_pic'):
             user.profile_pic = data['profile_pic']
-        if data.get('password'):
-            user.set_password(data['password'])
-            user.failed_login_attempts = 0
-            user.locked_until = None
         with transaction.atomic():
             user.save()
         messages.success(request, 'Teacher account updated successfully.')
@@ -226,8 +389,15 @@ def delete_teacher(request, teacher_id):
 
 
 def attendance_records(request):
-    records = Attendance.objects.select_related(
-        'course', 'subject', 'session').annotate(
+    filter_form = TeacherGradeFilterForm(request.GET)
+    records = visible_attendance(request.user)
+    if filter_form.is_valid():
+        if filter_form.cleaned_data['teacher']:
+            records = records.filter(
+                subject__teacher=filter_form.cleaned_data['teacher'])
+        if filter_form.cleaned_data['course']:
+            records = records.filter(course=filter_form.cleaned_data['course'])
+    records = records.annotate(
             present_count=Count(
                 'records',
                 filter=Q(records__status=True),
@@ -240,6 +410,7 @@ def attendance_records(request):
     page_obj = Paginator(records, 25).get_page(request.GET.get('page'))
     return render(request, 'hod_template/attendance_records.html', {
         'page_obj': page_obj,
+        'filter_form': filter_form,
         'page_title': 'Attendance Records',
     })
 
@@ -250,7 +421,8 @@ def generate_report(request):
         return redirect(reverse('admin_home'))
 
     role = 'teacher' if request.user.user_type == '3' else 'admin'
-    form = ReportGenerationForm(request.POST or None, role=role)
+    form = ReportGenerationForm(
+        request.POST or None, role=role, user=request.user)
     context = {'form': form, 'page_title': 'Generate Report'}
     if request.method != 'POST' or not form.is_valid():
         return render(request, 'hod_template/generate_report.html', context)
@@ -260,7 +432,8 @@ def generate_report(request):
     session = form.cleaned_data.get('session')
     subject = form.cleaned_data.get('subject')
 
-    title, headers, rows = _report_data(report_type, course, session, subject)
+    title, headers, rows = _report_data(
+        report_type, course, session, subject, user=request.user)
     if not rows:
         messages.warning(
             request, 'There is no data for the selected report options.')
@@ -329,7 +502,7 @@ def generate_report_card(request):
     if request.user.user_type != '3':
         return redirect(reverse('admin_home'))
 
-    form = ReportCardForm(request.POST or None)
+    form = ReportCardForm(request.POST or None, user=request.user)
     if request.method == 'POST' and form.is_valid():
         response = _report_card_pdf(
             request.user,
@@ -348,10 +521,18 @@ def generate_report_card(request):
 
 
 def _report_card_pdf(user, student, session):
-    results = list(StudentResult.objects.filter(
+    results_queryset = StudentResult.objects.filter(
         student=student,
         student__session=session,
-    ).select_related('subject').order_by('subject__name'))
+    )
+    if user.user_type == '3':
+        if student.teacher_id != user.teacher.pk:
+            return None
+        results_queryset = results_queryset.filter(
+            Q(subject__teacher__teacher=user)
+            | Q(subject__teacher__isnull=True))
+    results = list(results_queryset.select_related(
+        'subject').order_by('subject__name'))
     if not results:
         return None
 
@@ -396,28 +577,32 @@ def _report_card_pdf(user, student, session):
     )
 
 
-def _report_data(report_type, course, session, subject):
+def _report_data(report_type, course, session, subject, user=None):
+    students = visible_students(user) if user else Student.objects.all()
+    subjects = visible_subjects(user) if user else Subject.objects.all()
+    results_queryset = visible_results(user) if user else StudentResult.objects.all()
+
     if report_type == 'school_summary':
-        courses = Course.objects.annotate(
-            learner_count=Count('student')).order_by('name')
+        courses = grade_ordered_courses().annotate(
+            learner_count=Count('student'))
         course_rows = [[course.name, str(course.learner_count)]
                        for course in courses]
-        unassigned_count = Student.objects.filter(course__isnull=True).count()
+        unassigned_count = students.filter(course__isnull=True).count()
         if unassigned_count:
             course_rows.append(
                 ['Not assigned to a course', str(unassigned_count)])
-        if not Student.objects.exists() and not Course.objects.exists() and not Subject.objects.exists():
+        if not students.exists() and not Course.objects.exists() and not subjects.exists():
             return 'School Summary', [], []
         rows = [
-            ['Total learners', str(Student.objects.count())],
+            ['Total learners', str(students.count())],
             ['Total courses / grades', str(Course.objects.count())],
-            ['Total subjects', str(Subject.objects.count())],
+            ['Total subjects', str(subjects.count())],
             *course_rows,
         ]
         return 'School Summary', ['Metric / course / grade', 'Count'], rows
 
     if report_type == 'class_list':
-        learners = Student.objects.filter(
+        learners = students.filter(
             course=course, session=session
         ).select_related('admin').order_by('admin__last_name', 'admin__first_name')
         rows = [[f'{learner.admin.first_name} {learner.admin.last_name}',
@@ -426,10 +611,11 @@ def _report_data(report_type, course, session, subject):
             'Learner name', 'Username'], rows
 
     if report_type == 'learner_results':
-        results = StudentResult.objects.filter(
+        results = results_queryset.filter(
             student__course=course,
             student__session=session,
-            subject__course=course,
+        ).filter(
+            Q(subject__course=course) | Q(subject__course__isnull=True)
         ).select_related('student__admin', 'subject').order_by(
             'student__admin__last_name', 'student__admin__first_name', 'subject__name')
         if subject:
@@ -445,21 +631,27 @@ def _report_data(report_type, course, session, subject):
             'Learner name', 'Subject', 'Test / CA', 'Exam', 'Total'], rows
 
     if report_type == 'attendance_summary':
-        filters = Q(
+        learner_queryset = students.filter(
+            course=course,
+            session=session,
+        ).select_related('admin')
+        attendance_scope = Q(
             attendance_records__attendance__course=course,
             attendance_records__attendance__session=session,
         )
+        if user and user.user_type == '3':
+            attendance_scope &= (
+                Q(attendance_records__attendance__subject__teacher__teacher=user)
+                | Q(attendance_records__attendance__subject__teacher__isnull=True)
+            )
         if subject:
-            filters &= Q(
+            attendance_scope &= Q(
                 attendance_records__attendance__subject=subject)
-        learners = Student.objects.filter(
-            course=course,
-            session=session,
-        ).select_related('admin').annotate(
-            marked_count=Count('attendance_records', filter=filters),
+        learners = learner_queryset.annotate(
+            marked_count=Count('attendance_records', filter=attendance_scope),
             present_count=Count(
                 'attendance_records',
-                filter=filters & Q(attendance_records__status=True),
+                filter=attendance_scope & Q(attendance_records__status=True),
             ),
         ).order_by('admin__last_name', 'admin__first_name')
         rows = []
@@ -610,8 +802,6 @@ def add_student(request):
         return redirect(reverse('manage_student'))
 
     student_form = StudentForm(request.POST or None, request.FILES or None)
-    student_form.fields.pop('course')
-    student_form.fields.pop('session')
     context = {'form': student_form, 'page_title': 'Add Learner'}
     if request.method == 'POST':
         if student_form.is_valid():
@@ -621,10 +811,12 @@ def add_student(request):
             username = student_form.cleaned_data.get('username')
             gender = student_form.cleaned_data.get('gender')
             password = student_form.cleaned_data.get('password')
-            passport = request.FILES['profile_pic']
-            fs = FileSystemStorage()
-            filename = fs.save(passport.name, passport)
-            passport_url = fs.url(filename)
+            passport = request.FILES.get('profile_pic')
+            passport_url = ''
+            if passport:
+                fs = FileSystemStorage()
+                filename = fs.save(passport.name, passport)
+                passport_url = fs.url(filename)
             with transaction.atomic():
                 user = CustomUser.objects.create_user(
                     username=username,
@@ -637,14 +829,16 @@ def add_student(request):
                     address=address,
                     profile_pic=passport_url,
                 )
-                pin = issue_pin(user)
-            return render_pin_confirmation(
-                request,
-                'learner',
-                pin,
-                return_url=reverse('manage_student'),
-                return_label='Return to learners',
-            )
+                student = user.student
+                student.course = student_form.cleaned_data.get('course')
+                student.session = student_form.cleaned_data.get('session')
+                if request.user.user_type == '3':
+                    teacher = teacher_profile(request.user)
+                    student.teacher = teacher
+                    student.created_by = teacher
+                student.save()
+            messages.success(request, 'Learner account added successfully.')
+            return redirect(reverse('manage_student'))
         else:
             messages.error(request, "Could Not Add: ")
     return _render_manage_students(
@@ -655,8 +849,7 @@ def add_subject(request):
     if request.method != 'POST':
         return redirect(reverse('manage_subject'))
 
-    form = SubjectForm(request.POST or None)
-    form.fields.pop('course')
+    form = SubjectForm(request.POST or None, user=request.user)
     context = {
         'form': form,
         'page_title': 'Add Subject'
@@ -664,7 +857,12 @@ def add_subject(request):
     if request.method == 'POST':
         if form.is_valid():
             try:
-                subject = form.save()
+                subject = form.save(commit=False)
+                if request.user.user_type == '3':
+                    teacher = teacher_profile(request.user)
+                    subject.teacher = teacher
+                    subject.created_by = teacher
+                subject.save()
                 messages.success(request, "Successfully Added")
                 return redirect(reverse('manage_subject'))
 
@@ -679,19 +877,27 @@ def add_subject(request):
 def _render_manage_students(request, student_form=None, open_modal=None):
     if student_form is None:
         student_form = StudentForm()
-        student_form.fields.pop('course')
-        student_form.fields.pop('session')
     learner_ids_without_profiles = CustomUser.objects.filter(
         user_type='2', student__isnull=True).values_list('id', flat=True)
-    Student.objects.bulk_create(
-        [Student(admin_id=learner_id)
-         for learner_id in learner_ids_without_profiles],
-        ignore_conflicts=True,
-    )
+    for learner_id in learner_ids_without_profiles:
+        Student.objects.get_or_create(admin_id=learner_id)
+    filter_form = TeacherGradeFilterForm(request.GET)
+    students = visible_students(request.user)
+    if request.user.user_type == '1' and filter_form.is_valid():
+        if filter_form.cleaned_data['teacher']:
+            students = students.filter(
+                teacher=filter_form.cleaned_data['teacher'])
+        if filter_form.cleaned_data['course']:
+            students = students.filter(
+                course=filter_form.cleaned_data['course'])
     context = {
         'students': CustomUser.objects.filter(
-            user_type=2).select_related('student'),
+            pk__in=students.values('admin_id')).select_related(
+                'student__teacher__teacher',
+                'student__created_by__teacher',
+                'student__course'),
         'student_form': student_form,
+        'filter_form': filter_form,
         'open_modal': open_modal,
         'page_title': 'Manage Learners',
     }
@@ -700,14 +906,28 @@ def _render_manage_students(request, student_form=None, open_modal=None):
 
 def _render_manage_subjects(request, form=None, open_modal=False, read_only=False):
     if form is None:
-        form = SubjectForm()
-        form.fields.pop('course')
+        form = SubjectForm(user=request.user)
+    filter_form = TeacherGradeFilterForm(request.GET)
+    subjects = visible_subjects(request.user)
+    if request.user.user_type == '1' and filter_form.is_valid():
+        if filter_form.cleaned_data['teacher']:
+            subjects = subjects.filter(
+                teacher=filter_form.cleaned_data['teacher'])
+        if filter_form.cleaned_data['course']:
+            subjects = subjects.filter(
+                course=filter_form.cleaned_data['course'])
+    for subject in subjects:
+        subject.editable = (
+            request.user.user_type == '1'
+            or subject.teacher_id == request.user.teacher.pk
+        )
     context = {
-        'subjects': Subject.objects.all(),
+        'subjects': subjects,
         'form': form,
+        'filter_form': filter_form,
         'open_modal': open_modal,
-        'read_only': read_only,
-        'page_title': 'Subjects' if read_only else 'Manage Subjects',
+        'read_only': False,
+        'page_title': 'Manage Subjects',
     }
     return render(request, "hod_template/manage_subject.html", context)
 
@@ -717,12 +937,12 @@ def manage_student(request):
 
 
 def manage_subject(request):
-    return _render_manage_subjects(
-        request, read_only=request.user.user_type == '3')
+    return _render_manage_subjects(request)
 
 
 def edit_student(request, student_id):
-    student = get_object_or_404(Student, id=student_id)
+    student = get_object_or_404(
+        visible_students(request.user), id=student_id)
     form = StudentForm(
         request.POST or None,
         request.FILES or None,
@@ -776,8 +996,14 @@ def edit_student(request, student_id):
 
 
 def edit_subject(request, subject_id):
-    instance = get_object_or_404(Subject, id=subject_id)
-    form = SubjectForm(request.POST or None, instance=instance)
+    subject_queryset = (
+        Subject.objects.filter(teacher__teacher=request.user)
+        if request.user.user_type == '3'
+        else Subject.objects.all()
+    )
+    instance = get_object_or_404(subject_queryset, id=subject_id)
+    form = SubjectForm(
+        request.POST or None, instance=instance, user=request.user)
     context = {
         'form': form,
         'subject_id': subject_id,
@@ -786,7 +1012,10 @@ def edit_subject(request, subject_id):
     if request.method == 'POST':
         if form.is_valid():
             try:
-                form.save()
+                subject = form.save(commit=False)
+                if request.user.user_type == '3':
+                    subject.teacher = teacher_profile(request.user)
+                subject.save()
                 messages.success(request, "Successfully Updated")
                 return redirect(reverse('edit_subject', args=[subject_id]))
             except Exception as e:
@@ -797,9 +1026,8 @@ def edit_subject(request, subject_id):
 
 
 def manage_student_results(request):
-    form = StudentResultForm(request.POST or None)
-    results = list(StudentResult.objects.select_related(
-        'student__admin', 'subject').order_by(
+    form = StudentResultForm(request.POST or None, user=request.user)
+    results = list(visible_results(request.user).order_by(
             'student__admin__last_name', 'student__admin__first_name',
             'subject__name').annotate(
                 total_score=ExpressionWrapper(
@@ -819,7 +1047,10 @@ def manage_student_results(request):
     }
     if request.method == 'POST':
         if form.is_valid():
-            form.save()
+            result = form.save(commit=False)
+            if request.user.user_type == '3':
+                result.created_by = teacher_profile(request.user)
+            result.save()
             messages.success(request, 'Learner result added successfully.')
             return redirect(reverse('manage_student_results'))
         messages.error(request, 'Please correct the errors in the result form.')
@@ -827,8 +1058,10 @@ def manage_student_results(request):
 
 
 def edit_student_result(request, result_id):
-    result = get_object_or_404(StudentResult, id=result_id)
-    form = StudentResultForm(request.POST or None, instance=result)
+    result = get_object_or_404(
+        visible_results(request.user), id=result_id)
+    form = StudentResultForm(
+        request.POST or None, instance=result, user=request.user)
     context = {
         'form': form,
         'result': result,
@@ -845,7 +1078,8 @@ def edit_student_result(request, result_id):
 
 
 def delete_student_result(request, result_id):
-    result = get_object_or_404(StudentResult, id=result_id)
+    result = get_object_or_404(
+        visible_results(request.user), id=result_id)
     if request.method == 'POST':
         result.delete()
         messages.success(request, 'Learner result deleted successfully.')
@@ -967,14 +1201,22 @@ def send_student_notification(request):
 
 @csrf_exempt
 def delete_student(request, student_id):
-    student = get_object_or_404(CustomUser, student__id=student_id)
+    student = get_object_or_404(
+        CustomUser.objects.filter(
+            student__in=visible_students(request.user)),
+        student__id=student_id)
     student.delete()
     messages.success(request, "Learner deleted successfully!")
     return redirect(reverse('manage_student'))
 
 
 def delete_subject(request, subject_id):
-    subject = get_object_or_404(Subject, id=subject_id)
+    subject_queryset = (
+        Subject.objects.filter(teacher__teacher=request.user)
+        if request.user.user_type == '3'
+        else Subject.objects.all()
+    )
+    subject = get_object_or_404(subject_queryset, id=subject_id)
     subject.delete()
     messages.success(request, "Subject deleted successfully!")
     return redirect(reverse('manage_subject'))

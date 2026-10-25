@@ -6,8 +6,15 @@ from django.db.models.signals import post_save
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import RegexValidator
-from django.db.models import Q
+from django.db.models import (
+    Case,
+    IntegerField,
+    Q,
+    Value,
+    When,
+)
 from django.db.models.functions import Lower
+from django.db.models.functions import Cast, Substr
 
 
 
@@ -100,7 +107,11 @@ class Teacher(models.Model):
     teacher = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
 
     def __str__(self):
-        return self.teacher.get_full_name() or self.teacher.username
+        return (
+            self.teacher.get_full_name()
+            or self.teacher.username
+            or f'Teacher {self.pk}'
+        )
 
 
 class Course(models.Model):
@@ -120,13 +131,40 @@ class Session(models.Model):
         return "From " + str(self.start_year) + " to " + str(self.end_year)
 
 
+def grade_ordered_courses():
+    grade_number = Cast(Substr('name', 7), IntegerField())
+    return Course.objects.annotate(
+        _grade_order=Case(
+            When(name__regex=r'^Grade [0-9]+$', then=grade_number),
+            default=Value(1000),
+            output_field=IntegerField(),
+        ),
+    ).order_by('_grade_order', 'name')
+
+
 
 class Student(models.Model):
     admin = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
+    teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='learners',
+    )
+    created_by = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_learners',
+    )
     course = models.ForeignKey(
         Course, on_delete=models.SET_NULL, null=True, blank=True)
     session = models.ForeignKey(
         Session, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         verbose_name = 'learner'
@@ -138,6 +176,20 @@ class Student(models.Model):
 
 class Subject(models.Model):
     name = models.CharField(max_length=120)
+    teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='subjects',
+    )
+    created_by = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_subjects',
+    )
     course = models.ForeignKey(
         Course, on_delete=models.SET_NULL, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -152,6 +204,7 @@ class LoginActivity(models.Model):
         Student, on_delete=models.CASCADE, related_name='login_activities')
     logged_in_at = models.DateTimeField(auto_now_add=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         ordering = ['-logged_in_at']
@@ -160,6 +213,54 @@ class LoginActivity(models.Model):
 
     def __str__(self):
         return f'{self.student} - {self.logged_in_at}'
+
+
+class ActivityLog(models.Model):
+    ACTIONS = (
+        ('create', 'Create'),
+        ('update', 'Update'),
+        ('delete', 'Delete'),
+        ('sign_in', 'Sign in'),
+        ('sign_out', 'Sign out'),
+        ('failed_sign_in', 'Failed sign in'),
+    )
+
+    actor = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='activity_actions',
+    )
+    actor_username = models.CharField(max_length=150, blank=True, default='')
+    target_user = models.ForeignKey(
+        CustomUser,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='activity_events',
+    )
+    target_username = models.CharField(max_length=150, blank=True, default='')
+    target_user_id_snapshot = models.CharField(
+        max_length=64, blank=True, default='')
+    action = models.CharField(max_length=20, choices=ACTIONS)
+    object_type = models.CharField(max_length=100)
+    object_id = models.CharField(max_length=64, blank=True, default='')
+    description = models.CharField(max_length=255)
+    changes = models.JSONField(default=dict, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-pk']
+        indexes = [
+            models.Index(fields=['object_type', 'object_id']),
+            models.Index(fields=['action', 'created_at']),
+            models.Index(fields=['target_user', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.get_action_display()}: {self.description}'
 
 
 class GradeBand(models.Model):
@@ -243,6 +344,13 @@ class StudentResult(models.Model):
     student = models.ForeignKey(
         Student, on_delete=models.CASCADE, verbose_name='learner')
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
+    created_by = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_results',
+    )
     test = models.FloatField(default=0)
     exam = models.FloatField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -257,6 +365,13 @@ class Attendance(models.Model):
     course = models.ForeignKey(Course, on_delete=models.CASCADE)
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
     session = models.ForeignKey(Session, on_delete=models.CASCADE)
+    created_by = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_attendance',
+    )
     date = models.DateField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -279,6 +394,13 @@ class AttendanceReport(models.Model):
         Attendance, on_delete=models.CASCADE, related_name='records')
     student = models.ForeignKey(
         Student, on_delete=models.CASCADE, related_name='attendance_records')
+    created_by = models.ForeignKey(
+        Teacher,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_attendance_reports',
+    )
     status = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

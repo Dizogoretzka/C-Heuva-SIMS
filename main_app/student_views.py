@@ -17,6 +17,11 @@ from .views import render_pin_confirmation, update_profile_from_form
 
 def student_home(request):
     student = get_object_or_404(Student, admin=request.user)
+    available_subjects = Subject.objects.filter(
+        Q(course__isnull=True) | Q(course_id=student.course_id)
+    ).filter(
+        Q(teacher__isnull=True) | Q(teacher=student.teacher)
+    )
     report_card_available = bool(
         student.session
         and StudentResult.objects.filter(
@@ -25,7 +30,7 @@ def student_home(request):
         ).exists()
     )
     context = {
-        'total_subject': Subject.objects.count(),
+        'total_subject': available_subjects.count(),
         'student_result_count': StudentResult.objects.filter(
             student=student).count(),
         'report_card_available': report_card_available,
@@ -38,6 +43,8 @@ def student_view_subjects(request):
     student = get_object_or_404(Student, admin=request.user)
     subjects = Subject.objects.filter(
         Q(course__isnull=True) | Q(course_id=student.course_id)
+    ).filter(
+        Q(teacher__isnull=True) | Q(teacher=student.teacher)
     ).order_by('name')
     context = {
         'subjects': subjects,
