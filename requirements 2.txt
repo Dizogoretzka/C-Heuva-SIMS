@@ -87,7 +87,7 @@ Learners cannot access administrator or teacher pages or see other learners' res
 
 ### 3.5 System operator
 
-The system operator configures the deployment, database, media storage, environment secrets, Django Admin access, and optional Firebase services. The operator creates administrator accounts with `python manage.py create_admin`; the command displays the generated PIN once. The operator assigns usernames and issues initial PINs to existing staff using `create_usernames <csv_path>` and `issue_pins <csv_path>`, then securely distributes and deletes the one-time CSVs. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after usernames have been handed out. Django superuser passwords remain managed through Django's operator workflows. This is an operational responsibility rather than a fourth SIMS application role.
+The system operator configures the deployment, database, media storage, environment secrets, Django Admin access, and optional Firebase services. The operator creates administrator accounts with `python manage.py create_admin`; the command displays the generated PIN once. The optional `python manage.py create_default_accounts` command creates starter admin, teacher, and learner accounts with unique usernames and newly generated credentials; `--reuse-credentials` prompts securely for matching credentials when intentionally setting up a second environment. The command refuses to overwrite existing usernames and does not run automatically. The operator assigns usernames and issues initial PINs to existing staff using `create_usernames <csv_path>` and `issue_pins <csv_path>`, then securely distributes and deletes the one-time CSVs. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after usernames have been handed out. Django superuser passwords remain managed through Django's operator workflows. This is an operational responsibility rather than a fourth SIMS application role.
 
 ## 4. Users and permissions
 
@@ -183,6 +183,7 @@ SIMS does not send email and requires no SMTP host, credentials, or email settin
 ## 9. Operational and security notes
 
 - Create administrator accounts with `python manage.py create_admin`; the operator enters the administrator's name, username, and required profile details, and the command displays the generated PIN once. Staff accounts have unusable passwords.
+- For a separate starter account per role, run `python manage.py create_default_accounts`. Save its generated credentials securely. To reproduce them in another environment, run `python manage.py create_default_accounts --reuse-credentials` there and enter the same learner password and distinct admin/teacher PINs at the hidden prompts. Usernames are `mbangulap-admin`, `mbangulap-teacher`, and `mbangulap`; a single username cannot be reused across roles.
 - Run `create_usernames <csv_path>` and `issue_pins <csv_path>` for existing accounts; distribute the staff PIN CSV securely and delete all copies. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after username distribution.
 - Use `python manage.py prune_activity_log` to remove activity entries older than `SIMS_ACTIVITY_LOG_RETENTION_DAYS` (default 365); `--days` can override the period for a run. Django superuser passwords remain managed through Django's operator workflows.
 - Passwords are stored using Django's password-hashing mechanism and validated with configured Django password validators.

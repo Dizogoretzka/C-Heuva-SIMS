@@ -33,7 +33,7 @@ from .models import (
     Subject,
     Teacher,
 )
-from .credentials import generate_pin, issue_pin
+from .credentials import generate_pin, issue_pin, validate_pin
 from .views import render_pin_confirmation
 from .activity import reset_current_request, set_current_request
 
@@ -2646,6 +2646,13 @@ class PINAndLockoutTests(TestCase):
         ):
             self.assertEqual(generate_pin(), '14256')
 
+    def test_validate_pin_rejects_wrong_length_and_sequences(self):
+        with self.assertRaises(ValueError):
+            validate_pin('12345')
+        with self.assertRaises(ValueError):
+            validate_pin('1234')
+        self.assertEqual(validate_pin('90817'), '90817')
+
     def test_all_sign_in_failures_use_the_same_generic_error(self):
         attempts = (
             ('missing-user', self.pin, 'teacher'),
@@ -3116,3 +3123,84 @@ class ActivityLogTests(TestCase):
 
         self.assertFalse(ActivityLog.objects.filter(pk=old_entry.pk).exists())
         self.assertTrue(ActivityLog.objects.filter(pk=recent_entry.pk).exists())
+
+
+@override_settings(PASSWORD_HASHERS=[
+    'django.contrib.auth.hashers.MD5PasswordHasher',
+])
+class DefaultAccountCommandTests(TestCase):
+    @staticmethod
+    def _create_accounts(**options):
+        output = StringIO()
+        call_command('create_default_accounts', stdout=output, **options)
+        return output.getvalue()
+
+    def test_command_creates_distinct_role_accounts_with_generated_secrets(self):
+        output = self._create_accounts()
+        accounts = {
+            account.username: account
+            for account in CustomUser.objects.filter(
+                username__in=(
+                    'mbangulap-admin',
+                    'mbangulap-teacher',
+                    'mbangulap',
+                )
+            )
+        }
+        self.assertEqual(len(accounts), 3)
+        admin = accounts['mbangulap-admin']
+        teacher = accounts['mbangulap-teacher']
+        learner = accounts['mbangulap']
+        self.assertEqual(admin.user_type, '1')
+        self.assertEqual(teacher.user_type, '3')
+        self.assertEqual(learner.user_type, '2')
+        self.assertFalse(admin.has_usable_password())
+        self.assertFalse(teacher.has_usable_password())
+        self.assertTrue(learner.has_usable_password())
+        self.assertTrue(learner.check_password(
+            output.split('Learner: username=mbangulap, password=', 1)[1]
+            .splitlines()[0]))
+        self.assertIn('Administrator: username=mbangulap-admin, PIN=', output)
+        self.assertIn('Teacher: username=mbangulap-teacher, PIN=', output)
+        admin_pin = output.split(
+            'Administrator: username=mbangulap-admin, PIN=', 1)[1].splitlines()[0]
+        teacher_pin = output.split(
+            'Teacher: username=mbangulap-teacher, PIN=', 1)[1].splitlines()[0]
+        self.assertNotEqual(admin_pin, teacher_pin)
+        self.assertEqual(
+            [admin.is_superuser, teacher.is_superuser, learner.is_superuser],
+            [False, False, False],
+        )
+
+    def test_command_refuses_to_overwrite_existing_account(self):
+        CustomUser.objects.create_user(
+            username='mbangulap',
+            password='A-Valid-Learner-Password-927!',
+            user_type='2',
+            gender='F',
+        )
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command('create_default_accounts', stdout=StringIO())
+        self.assertFalse(
+            CustomUser.objects.filter(username='mbangulap-admin').exists())
+
+    def test_command_can_reuse_hidden_credentials_across_environments(self):
+        with patch(
+            'main_app.management.commands.create_default_accounts.getpass.getpass',
+            side_effect=[
+                'Strong-Shared-Learner-Pass-782!',
+                '48291',
+                '73914',
+            ],
+        ):
+            output = self._create_accounts(reuse_credentials=True)
+
+        self.assertIn(
+            'Administrator: username=mbangulap-admin, PIN=48291', output)
+        self.assertIn(
+            'Teacher: username=mbangulap-teacher, PIN=73914', output)
+        learner = CustomUser.objects.get(username='mbangulap')
+        self.assertTrue(learner.check_password(
+            'Strong-Shared-Learner-Pass-782!'))

@@ -16,15 +16,31 @@ def generate_pin():
 
     while True:
         pin = f'{secrets.randbelow(10 ** pin_length):0{pin_length}d}'
-        if len(set(pin)) == 1:
+        try:
+            return validate_pin(pin)
+        except ValueError:
             continue
-        if pin in _PIN_DIGITS or pin in _PIN_DIGITS[::-1]:
-            continue
-        return pin
 
 
-def issue_pin(user):
-    pin = generate_pin()
+def validate_pin(pin):
+    pin_length = settings.SIMS_PIN_LENGTH
+    if not 4 <= pin_length <= 10:
+        raise ValueError('SIMS_PIN_LENGTH must be between 4 and 10.')
+    if (
+        not isinstance(pin, str)
+        or len(pin) != pin_length
+        or not pin.isdigit()
+        or len(set(pin)) == 1
+        or pin in _PIN_DIGITS
+        or pin in _PIN_DIGITS[::-1]
+    ):
+        raise ValueError(
+            f'PIN must be a non-sequential {pin_length}-digit number.')
+    return pin
+
+
+def issue_pin(user, pin=None):
+    pin = generate_pin() if pin is None else validate_pin(pin)
     update_fields = [
         'pin_hash',
         'pin_issued_at',
