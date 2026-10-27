@@ -2214,9 +2214,6 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         cache.clear()
 
     def _learner_registration_data(self, username='new-learner', **kwargs):
-        course_value = kwargs.pop('course', None)
-        course = course_value or Course.objects.create(name='Grade 7')
-        course_id = getattr(course, 'pk', course)
         data = {
             'first_name': 'Taylor',
             'last_name': 'Learner',
@@ -2224,13 +2221,12 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             'gender': 'F',
             'password': 'A-Unique-Strong-Password-289!',
             'confirm_password': 'A-Unique-Strong-Password-289!',
-            'course': course_id,
         }
         data.update(kwargs)
-        return data, course if hasattr(course, 'pk') else None
+        return data
 
     def test_learner_registration_then_learner_sign_in(self):
-        data, course = self._learner_registration_data()
+        data = self._learner_registration_data()
 
         response = self.client.post(
             reverse('register_learner'), data, follow=True)
@@ -2239,7 +2235,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         self.assertContains(response, 'Registration complete')
         learner = CustomUser.objects.get(username='new-learner')
         self.assertEqual(learner.user_type, '2')
-        self.assertEqual(learner.student.course, course)
+        self.assertIsNone(learner.student.course)
         self.assertIsNone(learner.student.academic_period)
         self.assertIsNone(learner.student.teacher)
         self.assertIsNone(learner.student.created_by)
@@ -2268,7 +2264,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             gender='F',
             address='',
         )
-        learner_data, _ = self._learner_registration_data(
+        learner_data = self._learner_registration_data(
             username='DUPLICATE-USER')
         response = self.client.post(
             reverse('register_learner'), learner_data)
@@ -2278,13 +2274,13 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             username__iexact='duplicate-user').count(), 1)
 
     def test_password_confirmation_and_password_validators(self):
-        data, _ = self._learner_registration_data(
+        data = self._learner_registration_data(
             confirm_password='A-different-password-289!')
         response = self.client.post(
             reverse('register_learner'), data)
         self.assertContains(response, 'Passwords do not match')
 
-        data, _ = self._learner_registration_data(
+        data = self._learner_registration_data(
             username='weak-password',
             password='password',
             confirm_password='password',
@@ -2296,29 +2292,27 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         self.assertFalse(CustomUser.objects.filter(
             username='weak-password').exists())
 
-    def test_registration_shows_grade_choices_and_rejects_invalid_grade(self):
-        grade = Course.objects.create(name='Grade 9')
+    def test_learner_registration_does_not_show_or_require_a_grade(self):
+        Course.objects.create(name='Grade 9')
         response = self.client.get(reverse('register_learner'))
-        self.assertContains(response, 'Grade 9')
-        self.assertContains(response, 'Select a grade')
+        self.assertNotContains(response, 'Grade 9')
+        self.assertNotContains(response, 'name="course"')
 
-        data, _ = self._learner_registration_data(
-            username='invalid-grade',
-            course='999999',
-        )
+        data = self._learner_registration_data(username='unassigned-learner')
         response = self.client.post(
             reverse('register_learner'), data)
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'Select a valid choice')
-        self.assertFalse(CustomUser.objects.filter(
-            username='invalid-grade').exists())
-        self.assertTrue(grade.pk)
+        self.assertRedirects(
+            response,
+            reverse('role_login', args=['learner']),
+        )
+        self.assertIsNone(
+            CustomUser.objects.get(username='unassigned-learner').student.course)
 
     def test_invalid_usernames_are_rejected(self):
         Course.objects.create(name='Grade 7')
         for username in ('abc', 'a' * 21, '_starts-wrong', 'has space'):
             with self.subTest(username=username):
-                data, _ = self._learner_registration_data(username=username)
+                data = self._learner_registration_data(username=username)
                 response = self.client.post(
                     reverse('register_learner'), data)
                 self.assertEqual(response.status_code, 200)
@@ -2408,18 +2402,15 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         )
         self.assertNotIn('_auth_user_id', self.client.session)
 
-    def test_learner_registration_requires_a_database_grade(self):
+    def test_learner_registration_is_available_without_database_grades(self):
         response = self.client.get(reverse('register_learner'))
 
-        self.assertContains(
-            response,
-            'Registration is not available until the school adds grades.',
-        )
-        self.assertContains(response, 'disabled')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'Registration is not available')
+        self.assertNotContains(response, ' disabled')
 
     def test_registration_rejects_invalid_profile_image(self):
-        data, _ = self._learner_registration_data(
-            username='invalid-image')
+        data = self._learner_registration_data(username='invalid-image')
         data['profile_pic'] = SimpleUploadedFile(
             'photo.jpg', b'this is not an image', content_type='image/jpeg')
 
@@ -2481,7 +2472,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         )
 
     def test_registered_roles_cannot_sign_in_through_the_other_role(self):
-        learner_data, _ = self._learner_registration_data(
+        learner_data = self._learner_registration_data(
             username='role-check-learner')
         learner_registration = self.client.post(
             reverse('register_learner'), learner_data)

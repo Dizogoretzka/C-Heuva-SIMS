@@ -154,17 +154,11 @@ def register_learner(request):
         request.POST or None,
         request.FILES or None,
     )
-    has_grades = form.has_grades
     if request.method == 'POST':
         if _registration_rate_limited(request):
             messages.error(
                 request,
                 'Too many registration attempts. Please wait 15 minutes and try again.',
-            )
-        elif not has_grades:
-            messages.error(
-                request,
-                'Learner registration is unavailable until the school adds grades.',
             )
         elif form.is_valid():
             username = form.cleaned_data['username']
@@ -183,7 +177,7 @@ def register_learner(request):
                     profile_pic=profile_picture or '',
                 )
                 student = Student.objects.get(admin=user)
-                student.course = form.cleaned_data['course']
+                student.course = None
                 student.academic_period = None
                 student.save(update_fields=['course', 'academic_period'])
             messages.success(
@@ -195,7 +189,6 @@ def register_learner(request):
     return render(request, 'main_app/register.html', {
         'form': form,
         'selected_role': 'learner',
-        'has_grades': has_grades,
     })
 
 

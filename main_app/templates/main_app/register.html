@@ -26,11 +26,6 @@
                     {{ message }}
                 </div>
                 {% endfor %}
-                {% if selected_role == 'learner' and not has_grades %}
-                <div class="alert alert-warning">
-                    Registration is not available until the school adds grades.
-                </div>
-                {% endif %}
                 <form method="post" enctype="multipart/form-data">
                     {% csrf_token %}
                     {% for field in form %}
@@ -57,8 +52,7 @@
                     {% if form.non_field_errors %}
                     <div class="alert alert-danger">{{ form.non_field_errors }}</div>
                     {% endif %}
-                    <button type="submit" class="btn btn-primary btn-block"
-                        {% if selected_role == 'learner' and not has_grades %}disabled{% endif %}>
+                    <button type="submit" class="btn btn-primary btn-block">
                         Register
                     </button>
                 </form>

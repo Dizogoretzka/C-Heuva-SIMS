@@ -702,20 +702,7 @@ class RegistrationForm(forms.Form):
 
 
 class LearnerRegistrationForm(RegistrationForm):
-    course = forms.ModelChoiceField(
-        queryset=grade_ordered_courses(),
-        label='Grade',
-        empty_label='Select a grade',
-    )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields['course'].queryset = grade_ordered_courses()
-        self.has_grades = self.fields['course'].queryset.exists()
-        self.order_fields([
-            'first_name', 'last_name', 'username', 'gender',
-            'password', 'confirm_password', 'course', 'profile_pic',
-        ])
+    pass
 
 
 class TeacherAccountForm(forms.Form):
