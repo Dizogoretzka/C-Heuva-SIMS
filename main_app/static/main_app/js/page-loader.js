@@ -32,4 +32,24 @@
     document.documentElement.setAttribute('aria-busy', 'true');
     timeoutId = window.setTimeout(dismissLoader, 8000);
     window.addEventListener('load', dismissLoader, { once: true });
+
+    document.addEventListener('click', function (event) {
+        var exportTrigger = event.target.closest('[data-export-trigger]');
+        if (!exportTrigger) {
+            return;
+        }
+
+        loader.classList.remove('is-hidden');
+        loader.hidden = false;
+        loader.setAttribute('aria-busy', 'true');
+        document.documentElement.setAttribute('aria-busy', 'true');
+        window.setTimeout(function () {
+            loader.classList.add('is-hidden');
+            loader.setAttribute('aria-busy', 'false');
+            document.documentElement.removeAttribute('aria-busy');
+            window.setTimeout(function () {
+                loader.hidden = true;
+            }, 250);
+        }, 1200);
+    });
 })();

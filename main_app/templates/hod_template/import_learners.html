@@ -1,0 +1,101 @@
+{% extends "main_app/base.html" %}
+
+{% block page_title %}{{ page_title }}{% endblock %}
+
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card card-primary">
+            <div class="card-header">
+                <h3 class="card-title">Upload a learner file</h3>
+            </div>
+            <form method="post" enctype="multipart/form-data">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="upload">
+                <div class="card-body">
+                    <p>Upload a UTF-8 CSV or XLSX file. The file may contain up to {{ max_rows }} learner rows.</p>
+                    <p>Required columns: <code>first_name</code>, <code>last_name</code>, <code>username</code>, <code>gender</code> (M or F), and <code>course</code>. Leave course empty to keep a learner unassigned.</p>
+                    <p>
+                        <a href="{% url 'download_learner_import_template' %}?format=csv">CSV template</a>
+                        ·
+                        <a href="{% url 'download_learner_import_template' %}?format=xlsx">XLSX template</a>
+                    </p>
+                    {% for field in upload_form %}
+                    <div class="form-group">
+                        {{ field.label_tag }}
+                        {{ field }}
+                        {% if field.help_text %}<small class="form-text text-muted">{{ field.help_text }}</small>{% endif %}
+                        {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="card-footer">
+                    <button class="btn btn-primary" type="submit">Preview Import</button>
+                    <a class="btn btn-secondary" href="{% url 'manage_student' %}">Cancel</a>
+                </div>
+            </form>
+        </div>
+
+        {% if preview_rows %}
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">Preview ({{ preview_rows|length }} learner rows)</h3>
+            </div>
+            <div class="card-body">
+                {% if options_form.non_field_errors %}
+                <div class="alert alert-danger">{{ options_form.non_field_errors }}</div>
+                {% endif %}
+                <form method="post">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="confirm">
+                    <input type="hidden" name="preview_token" value="{{ preview_token }}">
+                    {% for field in options_form %}
+                    <div class="form-group">
+                        {{ field.label_tag }}
+                        {{ field }}
+                        {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                    </div>
+                    {% endfor %}
+                    {% if preview_has_errors %}
+                    <div class="alert alert-danger">
+                        Fix the invalid rows in your file and upload it again. No accounts will be created while any row has an error.
+                    </div>
+                    {% endif %}
+                    <div class="table-responsive">
+                        <table class="table table-bordered table-striped">
+                            <thead>
+                                <tr><th>File row</th><th>Name</th><th>Username</th><th>Gender</th><th>Course / grade</th><th>Validation</th></tr>
+                            </thead>
+                            <tbody>
+                                {% for row in preview_rows %}
+                                <tr>
+                                    <td>{{ row.line }}</td>
+                                    <td>{{ row.data.first_name }} {{ row.data.last_name }}</td>
+                                    <td>{{ row.data.username }}</td>
+                                    <td>{{ row.data.gender }}</td>
+                                    <td>{{ row.data.course_name|default:"Not assigned" }}</td>
+                                    <td>
+                                        {% if row.errors %}
+                                        <ul class="mb-0 text-danger">
+                                            {% for error in row.errors %}<li>{{ error }}</li>{% endfor %}
+                                        </ul>
+                                        {% else %}
+                                        <span class="text-success">Ready</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    <button class="btn btn-success" type="submit"
+                            {% if preview_has_errors %}disabled{% endif %}>
+                        Import {{ preview_rows|length }} Learners
+                    </button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

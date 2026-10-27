@@ -49,7 +49,17 @@
                 </li>
 
             </ul>
-
+            <div class="ml-auto px-2 text-right" style="max-width: 70%; overflow-wrap: anywhere;">
+                {% if current_academic_period %}
+                <span class="text-muted">Academic Period:</span>
+                <strong>{{ current_academic_period }}</strong>
+                {% else %}
+                <span class="text-muted">No academic period set</span>
+                {% if request.user.is_authenticated and request.user.user_type == '1' %}
+                <a class="ml-1" href="{% url 'manage_academic_periods' %}">Set one</a>
+                {% endif %}
+                {% endif %}
+            </div>
 
         </nav>
         <!-- /.navbar -->

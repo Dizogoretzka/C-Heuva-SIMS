@@ -19,6 +19,10 @@
                                 data-target="#addStudentModal">
                                 <i class="fas fa-user-plus mr-1"></i> Add Learner
                             </button>
+                            <a class="btn btn-outline-primary rounded-0"
+                               href="{% url 'import_learners' %}">
+                                <i class="fas fa-file-import mr-1"></i> Import Learners
+                            </a>
                         </div>
                         {% if request.user.user_type == '1' %}
                         <form method="get" class="form-row align-items-end mb-3">
@@ -34,6 +38,14 @@
                             </div>
                         </form>
                         {% endif %}
+                        <div class="mb-3">
+                            <a class="btn btn-primary"
+                               href="?{% if export_query_params %}{{ export_query_params }}&amp;{% endif %}export=pdf"
+                               data-export-trigger>Download PDF</a>
+                            <a class="btn btn-outline-success"
+                               href="?{% if export_query_params %}{{ export_query_params }}&amp;{% endif %}export=csv"
+                               data-export-trigger>Download CSV</a>
+                        </div>
                         {% include "main_app/search_bar.html" with search_target="manage-student-list" search_placeholder="Search learners..." %}
                         <table id="manage-student-list" class="table table-bordered table-hover">
                             <thead>

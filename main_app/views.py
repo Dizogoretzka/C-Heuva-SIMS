@@ -184,8 +184,8 @@ def register_learner(request):
                 )
                 student = Student.objects.get(admin=user)
                 student.course = form.cleaned_data['course']
-                student.session = None
-                student.save(update_fields=['course', 'session'])
+                student.academic_period = None
+                student.save(update_fields=['course', 'academic_period'])
             messages.success(
                 request,
                 'Registration complete. Sign in with your username and password.',

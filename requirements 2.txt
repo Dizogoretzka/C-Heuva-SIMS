@@ -4,8 +4,8 @@
 
 | Document detail | Value |
 |---|---|
-| Version | 3.0 |
-| Date | 21 October 2026 |
+| Version | 3.1 |
+| Date | 27 October 2026 |
 | Status | Describes the implemented application |
 | Intended audience | Administrators, teachers, school stakeholders, developers, and testers |
 
@@ -15,9 +15,11 @@ This document describes the current behavior of the C. Heuva Junior Secondary Sc
 
 ## 2. System overview
 
-SIMS is a browser-based Django application for managing school learner and academic records. Learners sign in with a username and password; administrators and teachers sign in with a username and PIN. The system provides learner self-registration, profiles, learner and subject management, results and grades, attendance, communications, administrator activity logging, learner login activity, and downloadable PDF reports.
+SIMS is a browser-based Django application for managing school learner and academic records. Learners sign in with a username and password; administrators and teachers sign in with a username and PIN. The system provides learner self-registration and staff-managed bulk import, profiles, learner and subject management, results and grades, attendance, communications, administrator activity logging, learner login activity, and PDF/CSV downloads.
 
 The application uses the database and media storage configured by the deployment. Email is not used for sign-in, account registration, or password recovery. Optional browser push depends on deployment configuration and external services.
+
+In the user interface, a **course/grade** is the learner's class level (for example, Grade 7); an **Academic Period** is the school year and term; and a **grade band** maps a learner's total score to a grade symbol such as A or B.
 
 ## 3. Current features
 
@@ -25,7 +27,7 @@ The application uses the database and media storage configured by the deployment
 
 - The landing page offers Administrator, Teacher, and Learner sign-in choices.
 - Each role has a role-specific sign-in page. Learners provide a username and password; administrators and teachers provide a username and PIN. A valid account cannot sign in through another role's page. Failures use a generic message, and configured account and IP lockout limits apply. Legacy accounts without a username can temporarily use their email in the username field while `SIMS_ALLOW_EMAIL_SIGNIN` is enabled.
-- Learners can register when at least one course/grade exists. They select a grade; their session/term is left unassigned until an administrator assigns it.
+- Learners can register when at least one course/grade exists. They select a grade; their Academic Period remains unassigned until a staff member assigns one.
 - Only learners can register themselves. Learner registration collects first name, last name, username, gender, password, password confirmation, an optional profile picture, and a grade. Email is not collected.
 - Administrators and teachers sign in only. Administrators are created by the operator with `python manage.py create_admin`; teachers are created by administrators through Manage Teachers.
 - Usernames are 4-20 characters, start with a letter or digit, use only letters, digits, dots, underscores, and hyphens, and are unique across roles without regard to case. The retained email field is optional and non-unique. Password confirmation and Django password validators are enforced. Profile pictures are optional JPG, JPEG, or PNG images up to 5 MB. Account and profile creation is transactional.
@@ -36,7 +38,9 @@ The application uses the database and media storage configured by the deployment
 Administrators can:
 
 - View the administrative dashboard, learner and subject totals, and recent learner sign-in information.
-- Add, list, edit, and delete learner accounts. Edit learner details and assign or change course/grade and session/term. Address and profile pictures are optional on staff learner forms. Learners created by teachers are assigned to that teacher; self-registered learners remain unassigned until an administrator assigns them.
+- Add, list, edit, and delete learner accounts. Edit learner details and assign or change course/grade and Academic Period. Address and profile pictures are optional on staff learner forms. Learners created by teachers are assigned to that teacher; self-registered learners remain unassigned until an administrator assigns them.
+- Import learners from CSV or XLSX using a preview-and-confirm flow. Imports are limited by configured file-size and row-count settings, validate every row before creating any account, and assign imported learners to the importing teacher or to the administrator-selected teacher. The application generates passwords and displays each one once after a successful import.
+- Download learner and teacher lists in PDF or CSV format. CSV files are UTF-8 with a byte-order mark and protect spreadsheet formulas.
 - Assign or reassign learners and subjects to teachers in bulk. The assignment page lists unassigned learners and school-wide subjects; clearing a teacher assignment makes a learner unassigned or a subject school-wide. Filter learner and subject lists by teacher and grade.
 - Add, list, edit, and delete teacher accounts. A generated teacher PIN is displayed once to the administrator; teacher accounts have no usable password.
 - Add, list, edit, and delete subjects. A subject may be associated with a grade or left school-wide, and assigned to a teacher or left school-wide.
@@ -46,10 +50,11 @@ Administrators can:
 - Send in-application notifications to learners. Browser push delivery is optional and depends on Firebase and client configuration.
 - View and update their own first name, last name, and profile picture; username is read-only. Administrator PINs cannot be changed through a web page, including Django Admin; the system operator manages them with management commands. Regular administrators have no usable password.
 - Set replacement learner passwords and teacher PINs. Administrators can reset learner passwords or teacher PINs; teachers can reset passwords for assigned learners only. The credential is shown once on a no-cache confirmation page, and resetting credentials clears lockout counters.
-- Generate the school-summary and class-list PDF reports.
+- Generate the school-summary and class-list reports in PDF or CSV format.
 - View recorded attendance in a read-only attendance records page, filtered by teacher and grade. Administrators cannot take or edit attendance.
-- Review a searchable, filterable, paginated activity log, export it as CSV, and open an activity timeline for a user. Activity records include actor, action, record, changes, time, and IP address; secret values are redacted. Records are removed after the configured retention period by a management command.
-- Maintain course/grade and session/term records using Django Admin; the main administrator interface does not have dedicated course or session management pages.
+- Review a searchable, filterable, paginated activity log, export it as PDF or CSV, and open an activity timeline for a user. Activity records include actor, action, record, changes, time, and IP address; secret values are redacted. Records are removed after the configured retention period by a management command.
+- Maintain Academic Periods in the administrator interface, including the current period. Existing legacy periods retain their date-based labels until an administrator assigns term and year.
+- Maintain course/grade records using Django Admin; the main administrator interface does not have a dedicated course-management page.
 
 Administrators cannot manage learner results or grade bands, generate learner-results or attendance-summary reports, or generate report cards. Those academic functions belong to teachers.
 
@@ -60,12 +65,13 @@ Teachers use the administrator-style page layout and styling with a role-specifi
 - View a dashboard showing only assigned learner totals and the teacher's assigned subject totals.
 - View and update their own first name, last name, and profile picture; username is read-only. Teachers authenticate with a PIN and can request a new PIN from their profile by confirming their current PIN.
 - Set replacement passwords for assigned learner accounts. Teachers cannot reset teacher or administrator credentials.
-- List, add, edit, and delete only learners assigned to the signed-in teacher. Newly created learners are assigned to that teacher; teachers can assign course/grade and session/term when adding or editing learners.
+- List, add, edit, and delete only learners assigned to the signed-in teacher. Newly created learners are assigned to that teacher; teachers can assign course/grade and Academic Period when adding or editing learners.
+- Preview and import learner files. Imported learners are automatically assigned to the signed-in teacher; the generated passwords are displayed once after a successful import.
 - Add subjects and edit or delete only their own assigned subjects. School-wide subjects are visible but read-only.
 - Create, update, and delete results only for assigned learners and for subjects assigned to that teacher or available school-wide.
-- Create, edit, and delete grade bands. The minimum score cannot exceed the maximum, and score ranges cannot overlap. Gaps are shown as warnings but do not prevent saving.
-- Generate learner report cards for assigned learners and a selected session/term. Teacher-generated cards include only results for that teacher's or school-wide subjects; each learner's own report card includes all of their results.
-- Generate class-list, learner-results, and attendance-summary PDF reports using assigned learners and the teacher's or school-wide subjects. Results and attendance reports can be filtered by subject where available.
+- Manage eight grade-band rows from the Reports page. Boundaries are whole numbers within the configured maximum score, ranges cannot overlap, duplicate symbols are rejected, and uncovered score ranges are shown as warnings.
+- Generate learner report cards for assigned learners and a selected Academic Period. Teacher-generated cards include only results for that teacher's or school-wide subjects; each learner's own report card includes all of their results.
+- Generate class-list, learner-results, and attendance-summary reports in PDF or CSV format using assigned learners and the teacher's or school-wide subjects. Results and attendance reports can be filtered by subject where available.
 - Take attendance only for assigned learners and for the teacher's or a school-wide subject in an assigned grade. Load previously entered attendance for correction. Saving updates an existing matching attendance record instead of creating a duplicate.
 
 Teachers cannot manage teacher accounts, reassign learners or subjects, review leave requests, reply to feedback, send learner notifications, access learner login activity, view the school-summary report, or open administrator attendance records.
@@ -76,12 +82,12 @@ Learners can:
 
 - View their dashboard and subjects matching their grade that are assigned to their teacher or school-wide.
 - View only their own results. Each displayed total is the test score plus the examination score; the grade is calculated from the current grade bands.
-- Download a report card only for themselves, when results exist for their assigned session/term.
+- Download their own report card in PDF or CSV format when results exist for their assigned Academic Period.
 - View only their own attendance records and calculated attendance percentage.
 - View notifications addressed to them.
 - Submit leave requests and view their status.
 - Submit feedback and view administrator replies.
-- View and update their own first name, last name, and profile picture; username, course/grade, and session/term are read-only on their own profile. Learners can change their password after confirming the current password.
+- View and update their own first name, last name, and profile picture; username, course/grade, and Academic Period are read-only on their own profile. Learners can change their password after confirming the current password.
 
 Learners cannot access administrator or teacher pages or see other learners' results, report cards, or attendance.
 
@@ -89,14 +95,21 @@ Learners cannot access administrator or teacher pages or see other learners' res
 
 The system operator configures the deployment, database, media storage, environment secrets, Django Admin access, and optional Firebase services. The operator creates administrator accounts with `python manage.py create_admin`; the command displays the generated PIN once. The optional `python manage.py create_default_accounts` command creates starter admin, teacher, and learner accounts with unique usernames and newly generated credentials; `--reuse-credentials` prompts securely for matching credentials when intentionally setting up a second environment. The command refuses to overwrite existing usernames and does not run automatically. The operator assigns usernames and issues initial PINs to existing staff using `create_usernames <csv_path>` and `issue_pins <csv_path>`, then securely distributes and deletes the one-time CSVs. Set `SIMS_ALLOW_EMAIL_SIGNIN=False` after usernames have been handed out. Django superuser passwords remain managed through Django's operator workflows. This is an operational responsibility rather than a fourth SIMS application role.
 
+### 3.6 Academic Periods, grade bands, imports, and downloads
+
+- An Academic Period identifies a school year and term. Administrators can add, edit, delete unused periods, and choose the current period. The current period is shown in the shared top bar and is used as the default in staff learner, report, attendance, and import forms. Existing date-only records are preserved and are not assigned an assumed term.
+- Grade bands are configured by teachers on the Reports page in an eight-row form. The maximum total score is configured with `SIMS_MAX_TOTAL_SCORE` (default 100). New result components cannot be negative or produce a total above the setting. The `check_result_totals` management command lists legacy out-of-range results without changing them. Totals are rounded half-up only to select a band; displayed totals remain unrounded. Totals below zero or above the configured maximum are always "Not graded."
+- Staff can download supported lists, reports, activity logs, learner login activity, and report cards as PDF or CSV. Downloads respect the user's role and existing data filters. Empty exports display a no-data message instead of returning an empty file. CSV downloads use UTF-8 with a byte-order mark and neutralize formula-like cell values. Export events are recorded in the administrator activity log.
+- Learner import accepts UTF-8 CSV and XLSX files with the provided template headers. The default limits are 2 MiB and 500 learner rows; deployments can override them with `SIMS_LEARNER_IMPORT_MAX_BYTES` and `SIMS_LEARNER_IMPORT_MAX_ROWS`. A preview validates the full file, including username uniqueness and course/grade names. Import is all-or-nothing, creates no accounts while any row is invalid, and assigns the selected Academic Period. Teacher uploads assign the learners to that teacher; administrators may optionally assign them to a teacher. Each new learner receives a generated password that is displayed once after the transaction succeeds.
+
 ## 4. Users and permissions
 
 | Role | Current access |
 |---|---|
 | Visitor | Landing page, role-specific sign-in pages, and learner registration. There is no administrator or teacher registration page. Forgotten learner passwords must be reset by authorized school staff; forgotten staff PINs must be reset by the administrator or operator. |
-| Administrator | Learner and teacher accounts, teacher assignments, subjects, school summary and class-list reports, learner communications and leave review, learner login activity, activity log, and read-only attendance records. |
-| Teacher | Assigned learner management and own/read-only school-wide subjects; scoped results, grade bands, report cards, class/results/attendance reports, and scoped attendance taking. |
-| Learner | Own grade-matching assigned or school-wide subjects, results, report card, attendance, notifications, leave requests, feedback, and restricted profile. |
+| Administrator | Learner and teacher accounts, teacher assignments, subjects, Academic Periods, learner import, PDF/CSV school summary and class-list reports, learner communications and leave review, PDF/CSV learner login activity and activity logs, and read-only attendance records. |
+| Teacher | Assigned learner management and import, own/read-only school-wide subjects; scoped results, Reports-page grade bands, PDF/CSV report cards and class/results/attendance reports, and scoped attendance taking. |
+| Learner | Own grade-matching assigned or school-wide subjects, results, PDF/CSV report card, attendance, notifications, leave requests, feedback, and restricted profile. |
 | System operator | Deployment and authorized Django Admin maintenance; not a separate application role. |
 
 An account has one application role and a globally unique username, compared without regard to case. The optional email field is retained for legacy data only; no email service is required. Role separation is enforced on the server, not only by navigation links. Unauthenticated visitors are redirected away from protected pages. The selected role at sign-in must match the authenticated account's role.
@@ -105,28 +118,30 @@ An account has one application role and a globally unique username, compared wit
 
 1. `CustomUser` stores a case-insensitively unique username, optional non-unique email retained for legacy accounts, a password hash for learners, gender, optional address and profile image, a configurable-length PIN hash and issuance time for staff, and one of the administrator, teacher, or learner role values. Regular staff password hashes are unusable. Each role has its corresponding one-to-one profile.
 2. A username has 4-20 characters, starts with a letter or digit, and contains only letters, digits, dots, underscores, and hyphens. The username may remain empty only during legacy-account migration; `create_usernames` assigns a unique username to each account that lacks one.
-3. Learner course/grade, session/term, teacher assignment, and creator may be empty. Public learner registration assigns a grade, leaves session/term unassigned, and does not assign a teacher. Teacher-created learners are assigned to their creating teacher. Teacher accounts are created by administrators through Manage Teachers, which displays the generated PIN once. The operator creates administrator accounts with `python manage.py create_admin`, which displays the generated PIN once.
+3. Learner course/grade, Academic Period, teacher assignment, and creator may be empty. Public learner registration assigns a grade, leaves Academic Period unassigned, and does not assign a teacher. Teacher-created and teacher-imported learners are assigned to their creating teacher. Teacher accounts are created by administrators through Manage Teachers, which displays the generated PIN once. The operator creates administrator accounts with `python manage.py create_admin`, which displays the generated PIN once.
 4. A subject may be assigned to a course/grade and teacher, or made school-wide by leaving either assignment empty. Teacher assignment is distinct from creator. Reassignment does not change the creator. Learner, subject, result, and attendance creator references use nullable `SET_NULL` relationships, so deleting a teacher does not delete these records. Existing learner and login-activity timestamps remain null after migration instead of receiving fabricated historical dates.
 5. Teachers see only assigned learners. They may manage results only for those learners and for their own or school-wide subjects. Teachers may take attendance only for their assigned learners and their own or school-wide subjects. Learners see grade-matching subjects assigned to their teacher or school-wide subjects. A learner's own report card includes all their results; teacher-generated cards include only results the teacher may access.
-6. A learner result stores test/continuous-assessment and examination scores. The displayed total is their sum. The application does not define a universal maximum score.
-7. Grade bands are created and maintained by teachers; the application does not create default bands. Grade symbols are calculated at display time using inclusive minimum and maximum boundaries. Results outside configured bands display "Not graded." Existing results reflect subsequent grade-band changes without being rewritten.
-8. An attendance record identifies a course/grade, subject, session/term, and date. Its per-learner records store present or absent. Re-entering the same course, subject, session/term, and date loads and updates the existing record. A unique database constraint prevents duplicate attendance sessions for that selection.
+6. A learner result stores test/continuous-assessment and examination scores. New results require non-negative components and a total no greater than `SIMS_MAX_TOTAL_SCORE` (default 100). The displayed total is the unrounded sum. The `check_result_totals` command reports existing rows outside the configured range without changing them.
+7. Grade bands are created and maintained by teachers on the Reports page; no default bands are created. Up to eight bands use whole-number inclusive boundaries from zero through the configured maximum. The application rejects incomplete rows, duplicate symbols, inverted ranges, and overlaps; gaps are warnings. Grade lookup rounds a total half-up to a whole number but does not change the stored or displayed total. Out-of-range totals always display "Not graded." Existing results reflect subsequent grade-band changes without being rewritten.
+8. An Academic Period identifies a school year and term, and at most one period is current. Legacy periods keep their prior date fields and labels until an administrator assigns term and year. New attendance records identify a course/grade, subject, Academic Period, and date. Re-entering the same selection loads and updates the existing record. A unique database constraint prevents duplicates.
 9. A learner's attendance percentage is the number of that learner's present records divided by their marked attendance records. Learners see only records associated with their own profile.
 10. Learner login activity is recorded only after successful learner sign-in. Administrator and teacher sign-ins and failed sign-ins do not create learner login-activity records. Administrator and teacher sign-ins, failed attempts, and tracked record mutations are recorded separately in the administrator activity log; secrets are never stored in activity details.
 11. Password and PIN reset actions clear failed-attempt counters and active locks. Learners authenticate and change their own password; staff authenticate with PIN only. Teachers may replace their own PIN after confirming the current PIN.
 12. Leave requests, feedback, replies, notifications, results, and attendance entries are associated with learner profiles. Deleting related accounts follows configured database relationships.
-13. Results use the learner's currently assigned session/term; a result does not contain a separate session/term field.
-14. `ActivityLog` stores action, actor username, optional actor and target-user references, target identity snapshots, record type and identifier, a redacted change summary, IP address, and timestamp. `SIMS_ACTIVITY_LOG_RETENTION_DAYS` controls expiry; the `prune_activity_log` command removes older entries.
+13. Results use the learner's currently assigned Academic Period; a result does not contain a separate Academic Period field.
+14. `ActivityLog` stores action, actor username, optional actor and target-user references, target identity snapshots, record type and identifier, a redacted change summary, IP address, and timestamp. It also records PDF/CSV exports and learner imports. `SIMS_ACTIVITY_LOG_RETENTION_DAYS` controls expiry; the `prune_activity_log` command removes older entries.
 
-## 6. Reports
+## 6. Reports and downloads
 
-- **School summary PDF (administrator):** learner, course/grade, and subject counts.
-- **Class-list PDF (administrator or teacher):** learners matching the selected course/grade and session/term.
-- **Learner-results PDF (teacher):** learner results for the selected course/grade and session/term, optionally filtered by subject.
-- **Attendance-summary PDF (teacher):** present and absent counts and attendance percentage for learners in the selected course/grade and session/term, optionally filtered by subject.
-- **Learner report-card PDF (teacher):** one learner's results for a selected session/term, with subject scores, total, calculated grade, band description and remark, overall average total, and blank class-teacher and principal remark lines.
+- **School summary (administrator):** learner, course/grade, and subject counts.
+- **Class list (administrator or teacher):** learners matching the selected course/grade and Academic Period.
+- **Learner results (teacher):** learner results for the selected course/grade and Academic Period, optionally filtered by subject.
+- **Attendance summary (teacher):** present and absent counts and attendance percentage for learners in the selected course/grade and Academic Period, optionally filtered by subject.
+- **Learner report card (teacher or the learner):** one learner's results for an Academic Period, with subject scores, unrounded total, calculated grade, band description and remark, overall average total, and blank class-teacher and principal remark lines. Teachers see only their own or school-wide subject results; a learner can download only their own report card.
+- Each supported report can be downloaded as PDF or CSV. Learner and teacher lists, activity logs/timelines, and learner login activity also have PDF and CSV downloads. Downloads retain active server-side filters and respect role ownership.
+- CSV files are UTF-8 encoded with a byte-order mark. Values beginning with spreadsheet formula characters are prefixed to prevent formula execution. Exported filenames include the Academic Period where available.
 
-Reports require the applicable course/grade, session/term, learner, or subject selections. If no matching data exists, the application displays a message rather than returning an empty PDF. Learners can download only their own report card.
+Reports require their applicable course/grade, Academic Period, learner, or subject selections. If no matching data exists, the application displays a message rather than returning an empty file. Export actions are audited in the activity log.
 
 ## 7. Current SRS requirement wording
 
@@ -145,17 +160,21 @@ The following statements replace or update the corresponding role and feature re
 | FR-003 | The application must authenticate a visitor through the selected role sign-in page using username and that role's secret (learner password or staff PIN); it must reject credentials when the account's role does not match the selected role. |
 | FR-005 | The server must enforce role permissions for all protected pages and actions: administrators cannot use teacher-only academic functions; teachers cannot use administrator-only functions; and learners cannot use either staff role's functions. Unauthenticated visitors must be redirected to the sign-in entry point. |
 | FR-014 | A teacher must be able to create, update, and delete learner results, including test/continuous-assessment and examination scores. The displayed total must be calculated as the sum of those scores. Administrators must not access result-management pages or actions. |
-| FR-028 | An administrator must be able to generate a school-summary PDF. A teacher must not access the school-summary report. |
-| FR-029 | An administrator or teacher must be able to generate a class-list PDF filtered by course/grade and session/term. Teacher reports must include only learners assigned to that teacher. |
-| FR-030 | A teacher must be able to generate learner-results and attendance-summary PDFs filtered by course/grade and session/term, with an optional subject filter. Reports must include only assigned learners and the teacher's or school-wide subjects. Administrators must not generate these reports. |
-| FR-031 | Reports must require their applicable selections and must display a no-data message instead of returning an empty PDF. The learner-results and attendance-summary reports are teacher-only; the school-summary report is administrator-only; the class-list report is shared by administrators and teachers. |
-| FR-052 | Teachers must be able to add, edit, list, and delete grade bands containing a symbol, minimum score, maximum score, description, and optional report-card remark. The minimum cannot exceed the maximum and score ranges cannot overlap. Gaps must be shown as warnings without preventing a save. Administrators must not manage grade bands. |
-| FR-053 | The application must calculate the grade from current grade bands when displaying each result. Boundaries are inclusive; a total outside all bands must display "Not graded." Changing a band must update grades displayed for existing results without changing the stored result. |
-| FR-054 | A teacher must be able to generate a report card for a selected learner and session/term. It must include subject test and examination scores, total, grade, band description and remark, average total, and blank class-teacher and principal remark lines. No matching results must produce a no-data message, not an empty PDF. A learner may download only their own report card. Administrators must not generate report cards. |
-| FR-055 | A teacher must be able to select a course/grade, subject, session/term, and date; mark each learner present or absent; and save attendance. An existing matching attendance session must load for correction, and a duplicate must not be created. Administrators may view attendance records but cannot take attendance. Learners must see only their own records and attendance percentage. |
+| FR-028 | An administrator must be able to download a school-summary report in PDF or CSV format. A teacher must not access the school-summary report. |
+| FR-029 | An administrator or teacher must be able to download a class-list report in PDF or CSV format filtered by course/grade and Academic Period. Teacher reports must include only learners assigned to that teacher. |
+| FR-030 | A teacher must be able to download learner-results and attendance-summary reports in PDF or CSV format filtered by course/grade and Academic Period, with an optional subject filter. Reports must include only assigned learners and the teacher's or school-wide subjects. Administrators must not generate these reports. |
+| FR-031 | Reports must require their applicable selections and must display a no-data message instead of returning an empty file. The learner-results and attendance-summary reports are teacher-only; the school-summary report is administrator-only; the class-list report is shared by administrators and teachers. |
+| FR-052 | Teachers must manage up to eight grade bands from the Reports page. Each band has a symbol and whole-number inclusive minimum and maximum within 0..`SIMS_MAX_TOTAL_SCORE`; description and remark are optional. The system must reject incomplete rows, duplicate symbols, inverted ranges, and overlaps. Gaps must be warnings that do not prevent saving. Administrators must not manage grade bands. |
+| FR-053 | The application must calculate the grade using current grade bands when displaying each result. It must round totals half-up only for grade-band lookup and retain the original total for display. Totals below zero or above `SIMS_MAX_TOTAL_SCORE` and totals outside all bands must display "Not graded." Changing bands must update displayed grades without changing stored results. |
+| FR-054 | A teacher must be able to generate a PDF or CSV report card for a selected learner and Academic Period. It must include subject test and examination scores, unrounded total, grade, band description and remark, average total, and blank class-teacher and principal remark lines. No matching results must produce a no-data message, not an empty file. A learner may download only their own report card. Administrators must not generate report cards. |
+| FR-055 | A teacher must be able to select a course/grade, subject, Academic Period, and date; mark each learner present or absent; and save attendance. An existing matching attendance record must load for correction, and a duplicate must not be created. Administrators may view attendance records but cannot take attendance. Learners must see only their own records and attendance percentage. |
 | FR-056 | Administrator teacher-management pages must support listing, adding, editing, and deleting teacher accounts. A generated teacher PIN must be displayed once to the administrator; staff accounts must not have usable passwords. Teacher-management pages must be inaccessible to teachers and learners. |
-| FR-057 | The system must record administrator and teacher sign-ins, failed sign-ins, and tracked record creation, update, and deletion in an administrator-only activity log. Log details must redact secrets and support search, action/date filters, pagination, CSV export, and a per-user timeline. The configurable retention command must delete expired log entries. |
+| FR-057 | The system must record administrator and teacher sign-ins, failed sign-ins, tracked record creation/update/deletion, and exports/imports in an administrator-only activity log. Log details must redact secrets and support search, action/date filters, pagination, PDF/CSV export, and a per-user timeline. The configurable retention command must delete expired log entries. |
 | FR-058 | The system must display a shared crest-based loading indicator on application and sign-in pages. It must expose an accessible status, honor reduced-motion preferences, remain visible for a brief minimum interval to avoid flashing, and dismiss when page resources load or after a bounded timeout. |
+| FR-059 | Administrators must manage Academic Period records through the main interface, set at most one current period, and see the current period in the shared top bar. Existing date-based periods must be preserved without an automatically inferred year or term. Staff forms must default to the current period where applicable. |
+| FR-060 | Administrators and teachers must be able to preview CSV or XLSX learner imports using provided templates. Default limits are 2 MiB and 500 rows, configurable with `SIMS_LEARNER_IMPORT_MAX_BYTES` and `SIMS_LEARNER_IMPORT_MAX_ROWS`. The system must validate required columns, username uniqueness, gender, and course/grade values before making any account; any invalid row must prevent the whole import. Teachers' imported learners must be assigned to them; administrators may select a teacher. Generated learner passwords must be displayed once after a successful import and must not be included in the upload file or preview. |
+| FR-061 | Supported lists, reports, report cards, activity logs/timelines, and learner login activity must be downloadable as PDF and CSV with existing role and ownership restrictions. CSV output must use UTF-8 with a byte-order mark and neutralize formula-like values. Empty downloads must show a no-data message, and each completed export must be audited. |
+| FR-062 | New result score components must be non-negative and their total must not exceed `SIMS_MAX_TOTAL_SCORE`, which defaults to 100 and can be set by the deployment environment. `python manage.py check_result_totals` must report legacy out-of-range results without modifying them. |
 | NFR-006 | Email and SMTP must not be required or used by SIMS for authentication, registration, notifications, or password recovery. The email column is optional, non-unique legacy data; usernames are the account identifier. |
 
 ### 7.2 SMTP and email services
@@ -165,12 +184,12 @@ SIMS does not send email and requires no SMTP host, credentials, or email settin
 ## 8. Features not currently provided
 
 - Attendance recording is provided; a separate attendance-history migration may have removed records created by earlier versions. Records are not recoverable from the current schema unless they exist in an external backup.
-- Dedicated main-interface pages for course/grade or session/term maintenance.
+- Dedicated main-interface pages for course/grade maintenance.
 - Admissions, fees/payments, timetabling, examination scheduling, parent/guardian accounts, or a native mobile application.
 - Guaranteed browser push delivery; this depends on configured external providers.
 - Email-based password or PIN recovery, SMTP delivery, and email notifications are not implemented.
 - Usernames and initial PINs must be distributed by authorized school staff using the one-time CSVs. Until usernames have been assigned, legacy email sign-in remains enabled when `SIMS_ALLOW_EMAIL_SIGNIN=True`.
-- Default grade bands, a universal score maximum, or automatic validation that all result totals fit a school-wide score range.
+- Default grade bands or automatic adjustment of existing result rows after the configured score maximum changes.
 - Guaranteed service availability, performance targets, backup/restore procedures, or retention schedules for records other than the configurable activity log.
 
 ### Known limitations
@@ -178,7 +197,7 @@ SIMS does not send email and requires no SMTP host, credentials, or email settin
 - Existing staff accounts must receive usernames and initial PINs from the operator-generated CSV files. Learners use passwords and do not receive PINs. The school is responsible for distributing staff PINs securely and removing the CSV copies.
 - Temporary email sign-in is available only for accounts without a username and only while `SIMS_ALLOW_EMAIL_SIGNIN=True`; it must be disabled after username distribution.
 - The application has no email-based recovery. Forgotten learner passwords require an authorized teacher or administrator; staff PINs require an administrator or operator.
-- The system does not enforce a universal maximum result score or require grade bands to cover every possible total.
+- The application does not create default grade bands or require grade bands to cover every possible total. The configured maximum applies to new result entry and grade lookup; legacy rows remain unchanged.
 
 ## 9. Operational and security notes
 
@@ -199,15 +218,18 @@ When a learner forgets a password, an administrator or the learner's assigned te
 1. The landing page offers administrator, teacher, and learner sign-in. Learners authenticate with username/password; administrators and teachers use username/PIN only. Sign-in failures use a generic message and configured lockout rules.
 2. Learners can register without email when a grade exists; username validation, case-insensitive uniqueness, password/image validation, and password-based sign-in work as specified. Administrator and teacher registration URLs return 404, and their sign-in pages do not link to registration. Teachers are created through Manage Teachers; administrators are created by the operator with `python manage.py create_admin`. Legacy email sign-in can be disabled after usernames are distributed.
 3. Administrators can manage learner and teacher accounts, assign learners and subjects to teachers, manage subjects, reset learner/teacher credentials, review leave and feedback, send notifications, view learner login activity, view and filter attendance records, and generate school-summary and class-list reports.
-4. Teachers can manage only assigned learners, create and manage their own subjects, view school-wide subjects read-only, manage results and grade bands within their scope, generate scoped report cards and class/results/attendance reports, take or correct attendance for assigned learners, reset assigned learner credentials, and update their own profile.
+4. Teachers can manage and import only assigned learners, create and manage their own subjects, view school-wide subjects read-only, manage results and Reports-page grade bands within their scope, generate scoped PDF/CSV report cards and class/results/attendance reports, take or correct attendance for assigned learners, reset assigned learner credentials, and update their own profile.
 5. Administrators cannot access teacher-only results, grade-band, report-card, results-report, or attendance-taking functions. Teachers cannot access administrator-only assignments, teacher management, leave/feedback/notification, login-activity, school-summary, or attendance-record pages, and cannot access another teacher's learner or subject management endpoints.
 6. Learners can access only their own results, report card, attendance, notifications, leave requests, feedback, and restricted profile. Their subjects must match their grade and be assigned to their teacher or school-wide. Teachers/learners cannot set administrator credentials, and administrator credentials cannot be changed through any web page, including Django Admin.
 7. Learners can change their own password with the current password. Teachers can request a new PIN with their current PIN. Staff credential resets clear locks; staff accounts do not use passwords.
-8. Attendance saves present/absent status for the selected class and date, updates an existing matching session rather than creating a duplicate, and displays an individual's attendance percentage to that learner.
-9. Reports return PDFs for matching records and display a no-data message when there are no matching records. Login activity and account reports display usernames rather than email addresses.
+8. Attendance saves present/absent status for the selected class, Academic Period, and date, updates an existing matching record rather than creating a duplicate, and displays an individual's attendance percentage to that learner.
+9. Supported reports, account lists, activity logs/timelines, learner login activity, and report cards return PDF or CSV files for matching records and display a no-data message when there are no matching records. CSV files are UTF-8 with a byte-order mark and neutralize formula-like values. Login activity and account reports display usernames rather than email addresses.
 10. Production deployment configures secrets, HTTPS, database/media storage, and optional Firebase services separately from source code. SMTP is not required or used.
-11. Administrator activity logs cover sign-ins, failed sign-ins, and tracked record creation, updates, and deletion; sensitive values are redacted. Administrators can filter, search, paginate, export CSV, and view a user timeline. The configured retention command removes expired entries.
+11. Administrator activity logs cover sign-ins, failed sign-ins, tracked record creation/updates/deletion, and exports/imports; sensitive values are redacted. Administrators can filter, search, paginate, export PDF/CSV, and view a user timeline. The configured retention command removes expired entries.
 12. The shared crest loading indicator is accessible to assistive technology, honors reduced-motion settings, and dismisses after page loading with a bounded timeout.
+13. Administrators can add, edit, delete unused, and select the current Academic Period; legacy date values are preserved. Staff learner, report, attendance, and import forms default to the current period when available.
+14. Learner CSV/XLSX imports provide a preview and validate the entire file before writing. File and row limits are enforced, all rows must be valid, teacher ownership is assigned correctly, and generated passwords are displayed once.
+15. New result scores reject negative components and totals above `SIMS_MAX_TOTAL_SCORE` (default 100). Grade selection uses half-up rounding without changing the displayed total; the legacy-result audit command reports but does not modify existing rows.
 
 ## 11. Traceability
 

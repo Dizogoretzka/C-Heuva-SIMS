@@ -5,6 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from django.conf import settings
 from django.core.cache import cache
 from django.contrib.auth.hashers import check_password
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -27,7 +28,7 @@ from .models import (
     CustomUser,
     GradeBand,
     LoginActivity,
-    Session,
+    AcademicPeriod,
     Student,
     StudentResult,
     Subject,
@@ -355,9 +356,9 @@ class InterfaceSelectionTests(TestCase):
             gender='F',
             address='',
         )
-        session = Session.objects.create(
+        academic_period = AcademicPeriod.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
-        learner.student.session = session
+        learner.student.academic_period = academic_period
         learner.student.save()
         subject = Subject.objects.create(name='Mathematics')
         StudentResult.objects.create(
@@ -387,7 +388,7 @@ class InterfaceSelectionTests(TestCase):
         self.assertContains(response, 'My Report Card')
         self.assertContains(
             response,
-            'Available after a session / term and results are assigned.',
+            'Available after an academic period / term and results are assigned.',
         )
         self.assertNotContains(response, reverse('student_report_card'))
 
@@ -490,14 +491,13 @@ class InterfaceSelectionTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, 'Grade Bands')
-        self.assertNotContains(response, reverse('manage_grade_bands'))
         self.assertNotContains(response, 'Learner Report Cards')
         self.assertNotContains(response, reverse('generate_report_card'))
         for label in (
             'Add Course',
             'Manage Course',
-            'Add Session',
-            'Manage Session',
+            'Add Academic Period',
+            'Manage Academic Period',
             'View Attendance',
         ):
             with self.subTest(label=label):
@@ -528,7 +528,7 @@ class InterfaceSelectionTests(TestCase):
         self.assertContains(response, 'action="' + reverse('add_student') + '"')
         self.assertNotContains(response, 'addSubjectModal')
         self.assertContains(response, 'id_course')
-        self.assertContains(response, 'id_session')
+        self.assertContains(response, 'id_academic_period')
         self.assertContains(response, 'Add Learner')
         self.assertNotContains(response, 'Add Student')
         self.assertNotContains(response, 'Add Subject</p>')
@@ -652,7 +652,7 @@ class InterfaceSelectionTests(TestCase):
         self.assertContains(admin_response, 'School Summary / Class List')
         self.assertNotContains(admin_response, 'Manage Results')
         self.assertNotContains(admin_response, reverse('manage_student_results'))
-        self.assertNotContains(admin_response, reverse('manage_grade_bands'))
+        self.assertNotContains(admin_response, 'Grade Bands')
         self.assertNotContains(admin_response, reverse('generate_report_card'))
         self.assertContains(
             admin_response, reverse('generate_report'), html=False)
@@ -678,7 +678,7 @@ class InterfaceSelectionTests(TestCase):
         self.client.force_login(teacher)
         teacher_response = self.client.get(reverse('teacher_home'))
         self.assertContains(teacher_response, 'Manage Results')
-        self.assertContains(teacher_response, reverse('manage_grade_bands'))
+        self.assertNotContains(teacher_response, 'Grade Bands')
         self.assertNotContains(teacher_response, reverse('manage_teachers'))
         self.assertNotContains(teacher_response, reverse('learner_login_activity'))
 
@@ -752,7 +752,7 @@ class InterfaceSelectionTests(TestCase):
             '/course/add',
             '/course/manage/',
             '/add_session/',
-            '/session/manage/',
+            '/academic_period/manage/',
             '/attendance/view/',
             '/attendance/fetch/',
             '/get_attendance',
@@ -767,7 +767,7 @@ class InterfaceSelectionTests(TestCase):
         from .forms import StudentForm
 
         self.assertIn('course', StudentForm().fields)
-        self.assertIn('session', StudentForm().fields)
+        self.assertIn('academic_period', StudentForm().fields)
         self.assertIn('course', [field.name for field in Subject._meta.fields])
 
     def test_attendance_models_and_teacher_summary_report_are_available(self):
@@ -980,14 +980,14 @@ class TeacherRoleAndAttendanceTests(TestCase):
             address='',
         )
         self.course = None
-        self.session = None
+        self.academic_period = None
         self.subject = None
 
     def _set_up_class(self):
         if self.course is not None:
             return
         self.course = Course.objects.create(name='Grade 8')
-        self.session = Session.objects.create(
+        self.academic_period = AcademicPeriod.objects.create(
             start_year='2026-01-01',
             end_year='2026-12-31',
         )
@@ -1010,7 +1010,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
             last_name='Learner',
         )
         learner.student.course = self.course
-        learner.student.session = self.session
+        learner.student.academic_period = self.academic_period
         learner.student.teacher = self.teacher.teacher
         learner.student.save()
         return learner
@@ -1104,7 +1104,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
                 'profile_pic': self._image(),
                 'address': 'School Road',
                 'course': self.course.pk,
-                'session': self.session.pk,
+                'academic_period': self.academic_period.pk,
             },
         )
         self.assertEqual(
@@ -1191,7 +1191,6 @@ class TeacherRoleAndAttendanceTests(TestCase):
         )
         admin_forbidden = (
             'manage_student_results',
-            'manage_grade_bands',
             'generate_report_card',
         )
         self.client.force_login(self.admin)
@@ -1244,7 +1243,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         selection = {
             'course': self.course.pk,
             'subject': self.subject.pk,
-            'session': self.session.pk,
+            'academic_period': self.academic_period.pk,
             'date': '2026-05-10',
             f'attendance_{learner.student.pk}': 'present',
         }
@@ -1252,7 +1251,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         self.assertRedirects(
             response,
             f"{reverse('teacher_attendance')}?course={self.course.pk}"
-            f"&subject={self.subject.pk}&session={self.session.pk}&date=2026-05-10",
+            f"&subject={self.subject.pk}&academic_period={self.academic_period.pk}&date=2026-05-10",
             fetch_redirect_response=False,
         )
         selection[f'attendance_{learner.student.pk}'] = 'absent'
@@ -1272,7 +1271,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         response = self.client.post(reverse('generate_report'), {
             'report_type': 'attendance_summary',
             'course': self.course.pk,
-            'session': self.session.pk,
+            'academic_period': self.academic_period.pk,
             'subject': self.subject.pk,
         })
         self.assertEqual(response['Content-Type'], 'application/pdf')
@@ -1294,7 +1293,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         attendance = Attendance.objects.create(
             course=self.course,
             subject=self.subject,
-            session=self.session,
+            academic_period=self.academic_period,
             date='2026-05-10',
         )
         AttendanceReport.objects.create(
@@ -1373,7 +1372,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
             gender='F',
         )
         learner.student.course = self.course
-        learner.student.session = self.session
+        learner.student.academic_period = self.academic_period
         learner.student.teacher = other_teacher.teacher
         learner.student.save()
         subject = Subject.objects.create(
@@ -1401,7 +1400,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
 
         response = self.client.post(reverse('generate_report_card'), {
             'student': learner.student.pk,
-            'session': self.session.pk,
+            'academic_period': self.academic_period.pk,
         })
         self.assertEqual(response.status_code, 200)
         self.assertNotEqual(response.get('Content-Type'), 'application/pdf')
@@ -1421,7 +1420,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         attendance = Attendance.objects.create(
             course=self.course,
             subject=self.subject,
-            session=self.session,
+            academic_period=self.academic_period,
             created_by=self.teacher.teacher,
             date='2026-05-10',
         )
@@ -1489,11 +1488,11 @@ class TeacherRoleAndAttendanceTests(TestCase):
             last_name='Learner',
         )
         course = Course.objects.create(name='Grade 7')
-        session = Session.objects.create(
+        academic_period = AcademicPeriod.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
         subject = Subject.objects.create(name='Mathematics', course=course)
         learner.student.course = course
-        learner.student.session = session
+        learner.student.academic_period = academic_period
         learner.student.save()
         StudentResult.objects.create(
             student=learner.student, subject=subject, test=18, exam=72)
@@ -1504,7 +1503,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
             {
                 'report_type': 'class_list',
                 'course': course.pk,
-                'session': session.pk,
+                'academic_period': academic_period.pk,
             },
         ]
         for options in report_options:
@@ -1519,7 +1518,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         from .hod_views import _report_data
 
         _, headers, rows = _report_data(
-            'class_list', course, session, None)
+            'class_list', course, academic_period, None)
         self.assertEqual(headers, ['Learner name', 'Username'])
         self.assertEqual(rows[0][1], learner.username)
 
@@ -1539,12 +1538,12 @@ class TeacherRoleAndAttendanceTests(TestCase):
             address='',
         )
         course = Course.objects.create(name='Grade 7')
-        session = Session.objects.create(
+        academic_period = AcademicPeriod.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
         subject = Subject.objects.create(name='Mathematics', course=course)
         learner.student.teacher = teacher.teacher
         learner.student.course = course
-        learner.student.session = session
+        learner.student.academic_period = academic_period
         learner.student.save()
         StudentResult.objects.create(
             student=learner.student, subject=subject, test=18, exam=72)
@@ -1553,7 +1552,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         response = self.client.post(reverse('generate_report'), {
             'report_type': 'learner_results',
             'course': course.pk,
-            'session': session.pk,
+            'academic_period': academic_period.pk,
             'subject': subject.pk,
         })
 
@@ -1758,121 +1757,136 @@ class GradeBandAndReportCardTests(TestCase):
         )
         self.client.force_login(self.teacher)
 
-    def test_teacher_can_add_edit_and_delete_grade_band(self):
-        response = self.client.post(reverse('manage_grade_bands'), {
-            'symbol': 'A',
-            'minimum_score': '80',
-            'maximum_score': '100',
-            'description': 'Excellent',
-            'remark': 'Excellent work',
-        })
-        self.assertRedirects(
-            response,
-            reverse('manage_grade_bands'),
-            fetch_redirect_response=False,
-        )
-        band = GradeBand.objects.get(symbol='A')
+    @staticmethod
+    def _grade_band_payload(rows):
+        data = {
+            'action': 'save_grade_bands',
+            'bands-TOTAL_FORMS': '8',
+            'bands-INITIAL_FORMS': '0',
+            'bands-MIN_NUM_FORMS': '0',
+            'bands-MAX_NUM_FORMS': '8',
+        }
+        for index in range(8):
+            row = rows[index] if index < len(rows) else {}
+            for name in ('from_score', 'to_score', 'symbol'):
+                data[f'bands-{index}-{name}'] = row.get(name, '')
+        return data
+
+    def test_reports_page_has_eight_grade_band_rows_and_saves_valid_rows(self):
+        GradeBand.objects.create(
+            symbol='Old', minimum_score=0, maximum_score=100)
+        response = self.client.get(reverse('generate_report'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Grade Bands')
+        self.assertEqual(len(response.context['grade_band_formset'].forms), 8)
+        self.assertContains(response, f'Scores are out of {settings.SIMS_MAX_TOTAL_SCORE}.')
 
         response = self.client.post(
-            reverse('edit_grade_band', args=[band.pk]), {
-                'symbol': 'B',
-                'minimum_score': '75',
-                'maximum_score': '90',
-                'description': 'Very good',
-                'remark': 'Keep it up',
-            })
-        self.assertRedirects(
-            response,
-            reverse('manage_grade_bands'),
-            fetch_redirect_response=False,
+            reverse('generate_report'),
+            self._grade_band_payload([
+                {'from_score': '0', 'to_score': '69', 'symbol': 'C'},
+                {'from_score': '70', 'to_score': '79', 'symbol': 'B'},
+                {
+                    'from_score': '80',
+                    'to_score': str(settings.SIMS_MAX_TOTAL_SCORE),
+                    'symbol': 'A',
+                },
+            ]),
         )
-        band.refresh_from_db()
-        self.assertEqual(band.symbol, 'B')
-        self.assertEqual(band.description, 'Very good')
 
-        response = self.client.post(
-            reverse('delete_grade_band', args=[band.pk]))
         self.assertRedirects(
-            response,
-            reverse('manage_grade_bands'),
-            fetch_redirect_response=False,
+            response, reverse('generate_report'),
+            fetch_redirect_response=False)
+        self.assertEqual(
+            list(GradeBand.objects.order_by('minimum_score').values_list(
+                'symbol', flat=True)),
+            ['C', 'B', 'A'],
         )
+        self.assertEqual(
+            GradeBand.objects.get(symbol='A').description, '')
+
+    def test_grade_band_rows_reject_incomplete_inverted_overlapping_and_duplicate(self):
+        existing = GradeBand.objects.create(
+            symbol='Keep', minimum_score=0, maximum_score=10)
+        invalid_rows = (
+            (
+                {'from_score': '1', 'to_score': '2', 'symbol': ''},
+                'Complete all three fields',
+            ),
+            (
+                {'from_score': '80', 'to_score': '70', 'symbol': 'A'},
+                'greater than or equal to From',
+            ),
+            (
+                {'from_score': '0', 'to_score': '70', 'symbol': 'A'},
+                'overlaps row',
+            ),
+            (
+                {'from_score': '0', 'to_score': '40', 'symbol': 'A'},
+                'duplicated',
+            ),
+        )
+        for first, error in invalid_rows:
+            with self.subTest(error=error):
+                second = (
+                    {'from_score': '60', 'to_score': '80', 'symbol': 'B'}
+                    if 'overlaps' in error
+                    else {'from_score': '50', 'to_score': '70', 'symbol': 'A'}
+                    if 'duplicated' in error
+                    else {}
+                )
+                response = self.client.post(
+                    reverse('generate_report'),
+                    self._grade_band_payload([first, second]),
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, error)
+                self.assertTrue(GradeBand.objects.filter(pk=existing.pk).exists())
+
+    def test_grade_bands_above_configured_maximum_are_rejected(self):
+        response = self.client.post(
+            reverse('generate_report'),
+            self._grade_band_payload([{
+                'from_score': '0',
+                'to_score': str(settings.SIMS_MAX_TOTAL_SCORE + 1),
+                'symbol': 'A',
+            }]),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Ensure this value is less than or equal to')
         self.assertFalse(GradeBand.objects.exists())
 
-    def test_grade_band_form_rejects_minimum_greater_than_maximum(self):
-        from .forms import GradeBandForm
-
-        form = GradeBandForm(data={
-            'symbol': 'A',
-            'minimum_score': '90',
-            'maximum_score': '80',
-            'description': 'Excellent',
-            'remark': '',
-        })
-
-        self.assertFalse(form.is_valid())
-        self.assertIn(
-            'Minimum score cannot be greater than maximum score.',
-            form.errors['minimum_score'],
-        )
-
-    def test_grade_band_form_rejects_overlapping_bands(self):
-        from .forms import GradeBandForm
-
-        GradeBand.objects.create(
-            symbol='B', minimum_score=50, maximum_score=79,
-            description='Good')
-        form = GradeBandForm(data={
-            'symbol': 'A',
-            'minimum_score': '79',
-            'maximum_score': '100',
-            'description': 'Excellent',
-            'remark': '',
-        })
-
-        self.assertFalse(form.is_valid())
-        self.assertIn('overlaps an existing grade band', form.errors['minimum_score'][0])
-
     def test_grade_band_gaps_warn_but_do_not_prevent_saving(self):
-        GradeBand.objects.create(
-            symbol='C', minimum_score=0, maximum_score=49,
-            description='Satisfactory')
-
-        response = self.client.post(reverse('manage_grade_bands'), {
-            'symbol': 'A',
-            'minimum_score': '60',
-            'maximum_score': '100',
-            'description': 'Excellent',
-            'remark': '',
-        })
-
-        self.assertRedirects(
-            response,
-            reverse('manage_grade_bands'),
-            fetch_redirect_response=False,
+        response = self.client.post(
+            reverse('generate_report'),
+            self._grade_band_payload([
+                {'from_score': '0', 'to_score': '49', 'symbol': 'C'},
+                {'from_score': '60', 'to_score': '79', 'symbol': 'B'},
+            ]),
+            follow=True,
         )
+        self.assertContains(response, 'Some score ranges are not covered')
         self.assertEqual(GradeBand.objects.count(), 2)
-        response = self.client.get(reverse('manage_grade_bands'))
-        self.assertContains(response, 'Score range gaps')
-        self.assertContains(response, '49.0 to 60.0')
 
-    def test_grade_helper_matches_boundaries_and_returns_not_graded(self):
+    def test_grade_helper_rounds_half_up_and_rejects_totals_outside_limit(self):
         from .grading import get_grade_band
 
         lower = GradeBand.objects.create(
-            symbol='C', minimum_score=0, maximum_score=49.5,
-            description='Satisfactory')
+            symbol='B', minimum_score=70, maximum_score=79)
         upper = GradeBand.objects.create(
-            symbol='B', minimum_score=49.6, maximum_score=79.9,
-            description='Good')
+            symbol='A', minimum_score=80,
+            maximum_score=settings.SIMS_MAX_TOTAL_SCORE)
 
-        self.assertEqual(get_grade_band(0).pk, lower.pk)
-        self.assertEqual(get_grade_band(49.5).pk, lower.pk)
-        self.assertEqual(get_grade_band(49.6).pk, upper.pk)
-        self.assertEqual(get_grade_band(79.9).pk, upper.pk)
-        self.assertEqual(get_grade_band(80), 'Not graded')
+        self.assertEqual(get_grade_band(79.5).pk, upper.pk)
+        self.assertEqual(get_grade_band(79.4).pk, lower.pk)
+        self.assertEqual(get_grade_band(-0.1), 'Not graded')
+        self.assertEqual(
+            get_grade_band(settings.SIMS_MAX_TOTAL_SCORE + 0.1),
+            'Not graded',
+        )
 
-    def test_changing_grade_band_changes_grade_for_existing_result(self):
+    def test_changing_grade_bands_changes_grade_for_existing_result(self):
         learner = CustomUser.objects.create_user(
             email='grade-learner@example.com',
             password='valid-password',
@@ -1885,28 +1899,135 @@ class GradeBandAndReportCardTests(TestCase):
         subject = Subject.objects.create(name='Mathematics')
         StudentResult.objects.create(
             student=learner.student, subject=subject, test=20, exam=70)
-        band = GradeBand.objects.create(
-            symbol='B', minimum_score=90, maximum_score=90,
-            description='Good')
+        GradeBand.objects.create(
+            symbol='B', minimum_score=70, maximum_score=89)
 
         response = self.client.get(reverse('manage_student_results'))
-        self.assertContains(response, '90.0 (B)')
+        self.assertContains(response, '90.0 (Not graded)')
 
-        response = self.client.post(
-            reverse('edit_grade_band', args=[band.pk]), {
+        response = self.client.post(reverse('generate_report'),
+            self._grade_band_payload([{
+                'from_score': '0', 'to_score': '89', 'symbol': 'B',
+            }, {
+                'from_score': '90',
+                'to_score': str(settings.SIMS_MAX_TOTAL_SCORE),
                 'symbol': 'A',
-                'minimum_score': '90',
-                'maximum_score': '90',
-                'description': 'Excellent',
-                'remark': '',
-            })
+            }]))
         self.assertRedirects(
             response,
-            reverse('manage_grade_bands'),
+            reverse('generate_report'),
             fetch_redirect_response=False,
         )
         response = self.client.get(reverse('manage_student_results'))
         self.assertContains(response, '90.0 (A)')
+
+    def test_result_entry_rejects_scores_outside_configured_total(self):
+        learner = CustomUser.objects.create_user(
+            username='score-limit-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        learner.student.teacher = self.teacher.teacher
+        learner.student.save()
+        subject = Subject.objects.create(name='Mathematics')
+        existing = StudentResult.objects.create(
+            student=learner.student, subject=subject, test=20, exam=30)
+
+        response = self.client.post(reverse('manage_student_results'), {
+            'student': learner.student.pk,
+            'subject': subject.pk,
+            'test': settings.SIMS_MAX_TOTAL_SCORE,
+            'exam': 1,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'cannot total more than')
+        self.assertEqual(StudentResult.objects.count(), 1)
+
+        response = self.client.post(
+            reverse('edit_student_result', args=[existing.pk]), {
+                'student': learner.student.pk,
+                'subject': subject.pk,
+                'test': settings.SIMS_MAX_TOTAL_SCORE,
+                'exam': 1,
+            })
+        self.assertEqual(response.status_code, 200)
+        existing.refresh_from_db()
+        self.assertEqual((existing.test, existing.exam), (20, 30))
+
+        response = self.client.post(reverse('manage_student_results'), {
+            'student': learner.student.pk,
+            'subject': subject.pk,
+            'test': -1,
+            'exam': 0,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context['form'].is_valid())
+        self.assertEqual(StudentResult.objects.count(), 1)
+
+    @override_settings(SIMS_MAX_TOTAL_SCORE=50)
+    def test_configured_maximum_drives_grade_band_and_result_validation(self):
+        response = self.client.get(reverse('generate_report'))
+        self.assertContains(response, 'Scores are out of 50.')
+
+        response = self.client.post(
+            reverse('generate_report'),
+            self._grade_band_payload([{
+                'from_score': '0', 'to_score': '51', 'symbol': 'A',
+            }]),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(GradeBand.objects.exists())
+
+        learner = CustomUser.objects.create_user(
+            username='setting-limit-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        learner.student.teacher = self.teacher.teacher
+        learner.student.save()
+        subject = Subject.objects.create(name='Science')
+        response = self.client.post(reverse('manage_student_results'), {
+            'student': learner.student.pk,
+            'subject': subject.pk,
+            'test': 30,
+            'exam': 21,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(StudentResult.objects.exists())
+
+    def test_check_result_totals_lists_invalid_rows_without_modifying_them(self):
+        learner = CustomUser.objects.create_user(
+            username='legacy-score-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        subject = Subject.objects.create(name='Legacy Scores')
+        over_limit = StudentResult.objects.create(
+            student=learner.student,
+            subject=subject,
+            test=settings.SIMS_MAX_TOTAL_SCORE + 5,
+            exam=1,
+        )
+        below_zero = StudentResult.objects.create(
+            student=learner.student, subject=subject, test=-2, exam=1)
+        output = StringIO()
+
+        call_command('check_result_totals', stdout=output)
+
+        self.assertIn(f'Result {over_limit.pk}', output.getvalue())
+        self.assertIn('above maximum', output.getvalue())
+        self.assertIn(f'Result {below_zero.pk}', output.getvalue())
+        self.assertIn('below zero', output.getvalue())
+        over_limit.refresh_from_db()
+        below_zero.refresh_from_db()
+        self.assertEqual(
+            (over_limit.test, over_limit.exam),
+            (settings.SIMS_MAX_TOTAL_SCORE + 5, 1),
+        )
+        self.assertEqual((below_zero.test, below_zero.exam), (-2, 1))
 
     def test_learner_results_show_their_current_grade(self):
         learner = CustomUser.objects.create_user(
@@ -1928,7 +2049,15 @@ class GradeBandAndReportCardTests(TestCase):
 
         self.assertContains(response, '80.0 (B)')
 
-    def test_grade_band_pages_are_restricted_to_teachers(self):
+    def test_removed_grade_band_urls_return_404_and_reports_respect_roles(self):
+        for url in (
+            '/admin/grade-bands/',
+            '/admin/grade-bands/edit/1/',
+            '/admin/grade-bands/delete/1/',
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 404)
+
         learner = CustomUser.objects.create_user(
             email='grade-viewer@example.com',
             password='valid-password',
@@ -1938,8 +2067,7 @@ class GradeBandAndReportCardTests(TestCase):
         )
         self.client.force_login(learner)
 
-        response = self.client.get(reverse('manage_grade_bands'))
-
+        response = self.client.get(reverse('generate_report'))
         self.assertRedirects(
             response,
             reverse('student_home'),
@@ -1947,7 +2075,7 @@ class GradeBandAndReportCardTests(TestCase):
         )
 
         self.client.logout()
-        response = self.client.get(reverse('manage_grade_bands'))
+        response = self.client.get('/admin/grade-bands/')
         self.assertRedirects(
             response,
             reverse('login_page'),
@@ -1961,15 +2089,12 @@ class GradeBandAndReportCardTests(TestCase):
             address='',
         )
         self.client.force_login(admin)
-        response = self.client.get(reverse('manage_grade_bands'))
-        self.assertRedirects(
-            response,
-            reverse('admin_home'),
-            fetch_redirect_response=False,
-        )
+        response = self.client.get(reverse('generate_report'))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'Grade Bands')
 
     def test_report_card_pdf_downloads_for_teacher(self):
-        learner, session, _, _ = self._make_learner_with_result(
+        learner, academic_period, _, _ = self._make_learner_with_result(
             'card-learner@example.com', 'Grade 8', 'Biology')
         GradeBand.objects.create(
             symbol='A', minimum_score=80, maximum_score=100,
@@ -1977,7 +2102,7 @@ class GradeBandAndReportCardTests(TestCase):
 
         response = self.client.post(reverse('generate_report_card'), {
             'student': learner.student.pk,
-            'session': session.pk,
+            'academic_period': academic_period.pk,
         })
 
         self.assertEqual(response.status_code, 200)
@@ -1985,7 +2110,7 @@ class GradeBandAndReportCardTests(TestCase):
         self.assertTrue(response.content.startswith(b'%PDF'))
         self.assertIn(b'/Subtype /Image', response.content)
         self.assertIn(
-            'attachment; filename="learner-report-card.pdf"',
+            'attachment; filename="learner-report-card-from-2026-01-01-to-2026-12-31.pdf"',
             response['Content-Disposition'],
         )
 
@@ -1997,23 +2122,23 @@ class GradeBandAndReportCardTests(TestCase):
             gender='F',
             address='',
         )
-        session = Session.objects.create(
+        academic_period = AcademicPeriod.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
         learner.student.teacher = self.teacher.teacher
-        learner.student.session = session
+        learner.student.academic_period = academic_period
         learner.student.save()
 
         response = self.client.post(reverse('generate_report_card'), {
             'student': learner.student.pk,
-            'session': session.pk,
+            'academic_period': academic_period.pk,
         })
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response['Content-Type'], 'text/html; charset=utf-8')
-        self.assertContains(response, 'There are no results for this learner and session / term.')
+        self.assertContains(response, 'There are no results for this learner and academic period.')
 
     def test_learner_can_download_only_their_own_report_card(self):
-        learner, session, own_subject, _ = self._make_learner_with_result(
+        learner, academic_period, own_subject, _ = self._make_learner_with_result(
             'own-card@example.com', 'Grade 7', 'Own Subject')
         other_learner, _, other_subject, _ = self._make_learner_with_result(
             'other-card@example.com', 'Grade 8', 'Other Subject')
@@ -2068,17 +2193,17 @@ class GradeBandAndReportCardTests(TestCase):
             last_name='Learner',
         )
         course = Course.objects.create(name=course_name)
-        session = Session.objects.create(
+        academic_period = AcademicPeriod.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
         learner.student.course = course
-        learner.student.session = session
+        learner.student.academic_period = academic_period
         learner.student.teacher = self.teacher.teacher
         learner.student.save()
         subject = Subject.objects.create(
             name=subject_name, course=course, teacher=self.teacher.teacher)
         result = StudentResult.objects.create(
             student=learner.student, subject=subject, test=20, exam=70)
-        return learner, session, subject, result
+        return learner, academic_period, subject, result
 
 
 @override_settings(PASSWORD_HASHERS=[
@@ -2115,7 +2240,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         learner = CustomUser.objects.get(username='new-learner')
         self.assertEqual(learner.user_type, '2')
         self.assertEqual(learner.student.course, course)
-        self.assertIsNone(learner.student.session)
+        self.assertIsNone(learner.student.academic_period)
         self.assertIsNone(learner.student.teacher)
         self.assertIsNone(learner.student.created_by)
         self.assertFalse(learner.pin_hash)
@@ -2413,12 +2538,12 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         )
         own_grade = Course.objects.create(name='Own Grade')
         forged_grade = Course.objects.create(name='Forged Grade')
-        own_session = Session.objects.create(
+        own_session = AcademicPeriod.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
-        forged_session = Session.objects.create(
+        forged_session = AcademicPeriod.objects.create(
             start_year='2027-01-01', end_year='2027-12-31')
         learner.student.course = own_grade
-        learner.student.session = own_session
+        learner.student.academic_period = own_session
         learner.student.save()
         self.client.force_login(learner)
 
@@ -2427,7 +2552,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
             'last_name': 'Name',
             'email': 'attacker@example.com',
             'course': forged_grade.pk,
-            'session': forged_session.pk,
+            'academic_period': forged_session.pk,
         })
 
         self.assertRedirects(
@@ -2439,7 +2564,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         learner.student.refresh_from_db()
         self.assertEqual(learner.email, 'restricted-learner@example.com')
         self.assertEqual(learner.student.course, own_grade)
-        self.assertEqual(learner.student.session, own_session)
+        self.assertEqual(learner.student.academic_period, own_session)
         self.assertEqual(learner.first_name, 'Changed')
 
     def test_admin_profile_ignores_submitted_email(self):
@@ -3204,3 +3329,400 @@ class DefaultAccountCommandTests(TestCase):
         learner = CustomUser.objects.get(username='mbangulap')
         self.assertTrue(learner.check_password(
             'Strong-Shared-Learner-Pass-782!'))
+
+
+@override_settings(PASSWORD_HASHERS=[
+    'django.contrib.auth.hashers.MD5PasswordHasher',
+])
+class LearnerImportAndExportTests(TestCase):
+    def setUp(self):
+        self.admin = CustomUser.objects.create_user(
+            username='export-admin',
+            password='valid-password',
+            user_type='1',
+            gender='F',
+        )
+        self.teacher_user = CustomUser.objects.create_user(
+            username='export-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='M',
+        )
+        self.period = AcademicPeriod.objects.create(
+            year=2026, term=1, is_current=True)
+        self.course = Course.objects.create(name='Grade 7')
+        self.client.force_login(self.admin)
+
+    @staticmethod
+    def _csv_file(rows, name='learners.csv'):
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            'first_name', 'last_name', 'username', 'gender', 'course',
+        ])
+        writer.writerows(rows)
+        return SimpleUploadedFile(
+            name, buffer.getvalue().encode('utf-8'), content_type='text/csv')
+
+    def _preview_csv(self, rows, name='learners.csv'):
+        return self.client.post(
+            reverse('import_learners'),
+            {
+                'action': 'upload',
+                'file': self._csv_file(rows, name=name),
+            },
+        )
+
+    def test_csv_import_previews_then_creates_learners_with_one_time_passwords(self):
+        response = self._preview_csv([[
+            'Ada', 'Okafor', 'ada-imported', 'F', 'Grade 7',
+        ]])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Preview (1 learner rows)')
+        self.assertContains(response, 'Ready')
+        token = response.context['preview_token']
+
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'confirm',
+            'preview_token': token,
+            'academic_period': self.period.pk,
+            'teacher': self.teacher_user.teacher.pk,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('no-store', response['Cache-Control'])
+        self.assertContains(response, 'shown only once')
+        learner = CustomUser.objects.get(username='ada-imported')
+        self.assertEqual(learner.user_type, '2')
+        self.assertEqual(learner.student.course, self.course)
+        self.assertEqual(learner.student.academic_period, self.period)
+        self.assertEqual(learner.student.teacher, self.teacher_user.teacher)
+        self.assertIsNone(learner.student.created_by)
+        password = response.context['credentials'][0]['password']
+        self.assertTrue(learner.check_password(password))
+        self.assertTrue(ActivityLog.objects.filter(action='import').exists())
+        self.assertNotIn('learner_import_preview', self.client.session)
+
+    def test_teacher_import_assigns_accounts_only_to_themselves(self):
+        self.client.force_login(self.teacher_user)
+        response = self._preview_csv([[
+            'Kai', 'Learner', 'kai-imported', 'M', 'Grade 7',
+        ]])
+        token = response.context['preview_token']
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'confirm',
+            'preview_token': token,
+            'academic_period': self.period.pk,
+        })
+
+        learner = CustomUser.objects.get(username='kai-imported')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(learner.student.teacher, self.teacher_user.teacher)
+        self.assertEqual(learner.student.created_by, self.teacher_user.teacher)
+
+    def test_invalid_duplicate_and_unknown_course_rows_cannot_be_imported(self):
+        response = self._preview_csv([
+            ['Ada', 'Okafor', 'duplicate-import', 'F', 'Grade 7'],
+            ['Bea', 'Bello', 'duplicate-import', 'F', 'Missing grade'],
+        ])
+
+        self.assertTrue(response.context['preview_has_errors'])
+        self.assertContains(response, 'duplicated in this file')
+        self.assertContains(response, 'does not exist')
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'confirm',
+            'preview_token': response.context['preview_token'],
+            'academic_period': self.period.pk,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(CustomUser.objects.filter(
+            username='duplicate-import').exists())
+        self.assertContains(response, 'No accounts will be created')
+
+    @override_settings(SIMS_LEARNER_IMPORT_MAX_ROWS=1)
+    def test_import_row_limit_is_enforced(self):
+        response = self._preview_csv([
+            ['Ada', 'Okafor', 'first-import', 'F', 'Grade 7'],
+            ['Bea', 'Bello', 'second-import', 'F', 'Grade 7'],
+        ])
+        self.assertContains(response, 'exceeds the 1-row limit')
+        self.assertFalse(response.context['preview_rows'])
+
+    def test_xlsx_import_and_template_are_supported(self):
+        from openpyxl import Workbook, load_workbook
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append([
+            'first_name', 'last_name', 'username', 'gender', 'course',
+        ])
+        worksheet.append(['Sam', 'Learner', 'sam-xlsx', 'M', 'Grade 7'])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        upload = SimpleUploadedFile(
+            'learners.xlsx',
+            buffer.getvalue(),
+            content_type=(
+                'application/vnd.openxmlformats-officedocument.'
+                'spreadsheetml.sheet'),
+        )
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'upload',
+            'file': upload,
+        })
+        self.assertContains(response, 'sam-xlsx')
+
+        template = self.client.get(
+            reverse('download_learner_import_template'),
+            {'format': 'xlsx'},
+        )
+        self.assertEqual(template.status_code, 200)
+        template_book = load_workbook(BytesIO(template.content), read_only=True)
+        self.assertEqual(
+            list(next(template_book.active.iter_rows(values_only=True))),
+            ['first_name', 'last_name', 'username', 'gender', 'course'],
+        )
+        template_book.close()
+
+    def test_import_preview_expires_and_learner_role_is_denied(self):
+        response = self._preview_csv([[
+            'Ada', 'Okafor', 'expired-import', 'F', 'Grade 7',
+        ]])
+        token = response.context['preview_token']
+        session = self.client.session
+        preview = session['learner_import_preview']
+        preview['created_at'] = timezone.now().timestamp() - 901
+        session['learner_import_preview'] = preview
+        session.save()
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'confirm',
+            'preview_token': token,
+            'academic_period': self.period.pk,
+        })
+        self.assertRedirects(
+            response, reverse('import_learners'),
+            fetch_redirect_response=False)
+        self.assertFalse(CustomUser.objects.filter(
+            username='expired-import').exists())
+
+        learner = CustomUser.objects.create_user(
+            username='import-denied',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        self.client.force_login(learner)
+        response = self.client.get(reverse('import_learners'))
+        self.assertRedirects(
+            response, reverse('student_home'),
+            fetch_redirect_response=False)
+
+    def test_learner_csv_export_sanitizes_formulas_and_logs_the_export(self):
+        learner = CustomUser.objects.create_user(
+            username='csv-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+            first_name='=1+1',
+        )
+        learner.student.course = self.course
+        learner.student.academic_period = self.period
+        learner.student.save()
+
+        response = self.client.get(reverse('manage_student'), {'export': 'csv'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.content.startswith(b'\xef\xbb\xbf'))
+        self.assertIn(b"'=1+1", response.content)
+        self.assertIn('learner-list-term-1-2026.csv', response['Content-Disposition'])
+        self.assertTrue(ActivityLog.objects.filter(
+            action='export', actor=self.admin,
+            description__contains='Learner List').exists())
+
+    def test_teacher_list_and_login_activity_support_pdf_and_csv(self):
+        teacher_csv = self.client.get(
+            reverse('manage_teachers'), {'export': 'csv'})
+        self.assertEqual(teacher_csv['Content-Type'], 'text/csv; charset=utf-8')
+        self.assertIn(b'export-teacher', teacher_csv.content)
+        teacher_pdf = self.client.get(
+            reverse('manage_teachers'), {'export': 'pdf'})
+        self.assertTrue(teacher_pdf.content.startswith(b'%PDF'))
+
+        learner = CustomUser.objects.create_user(
+            username='login-export-learner',
+            password='valid-password',
+            user_type='2',
+            gender='M',
+        )
+        learner.student.course = self.course
+        learner.student.save()
+        LoginActivity.objects.create(student=learner.student)
+        login_csv = self.client.get(
+            reverse('learner_login_activity'), {'export': 'csv'})
+        self.assertEqual(login_csv.status_code, 200)
+        self.assertIn(b'login-export-learner', login_csv.content)
+        login_pdf = self.client.get(
+            reverse('learner_login_activity'), {'export': 'pdf'})
+        self.assertTrue(login_pdf.content.startswith(b'%PDF'))
+
+        learner_pdf = self.client.get(
+            reverse('manage_student'), {'export': 'pdf'})
+        self.assertTrue(learner_pdf.content.startswith(b'%PDF'))
+
+    def test_activity_log_report_and_report_cards_export_as_csv(self):
+        ActivityLog.objects.create(
+            actor=self.admin,
+            actor_username=self.admin.username,
+            action='sign_in',
+            description='Export test activity',
+        )
+        activity_csv = self.client.get(
+            reverse('activity_log'), {'export': 'csv'})
+        self.assertEqual(activity_csv.status_code, 200)
+        self.assertIn(b'Export test activity', activity_csv.content)
+        activity_pdf = self.client.get(
+            reverse('activity_log'), {'export': 'pdf'})
+        self.assertTrue(activity_pdf.content.startswith(b'%PDF'))
+
+        learner = CustomUser.objects.create_user(
+            username='report-export-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+            first_name='Report',
+            last_name='Learner',
+        )
+        learner.student.course = self.course
+        learner.student.academic_period = self.period
+        learner.student.teacher = self.teacher_user.teacher
+        learner.student.save()
+        subject = Subject.objects.create(
+            name='Mathematics',
+            course=self.course,
+            teacher=self.teacher_user.teacher,
+        )
+        StudentResult.objects.create(
+            student=learner.student, subject=subject, test=20, exam=70)
+        report_csv = self.client.post(reverse('generate_report'), {
+            'report_type': 'school_summary',
+            'export_format': 'csv',
+        })
+        self.assertEqual(report_csv.status_code, 200)
+        self.assertIn(b'Total learners', report_csv.content)
+
+        self.client.force_login(self.teacher_user)
+        report_card_csv = self.client.post(
+            reverse('generate_report_card'), {
+                'student': learner.student.pk,
+                'academic_period': self.period.pk,
+                'export_format': 'csv',
+            })
+        self.assertEqual(report_card_csv.status_code, 200)
+        self.assertIn(b'Mathematics', report_card_csv.content)
+
+        self.client.force_login(learner)
+        own_card_csv = self.client.get(
+            reverse('student_report_card'), {'export': 'csv'})
+        self.assertEqual(own_card_csv.status_code, 200)
+        self.assertIn(b'Mathematics', own_card_csv.content)
+
+    def test_empty_exports_return_page_message_without_a_file(self):
+        response = self.client.get(
+            reverse('learner_login_activity'), {'export': 'csv'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/html; charset=utf-8')
+        self.assertContains(response, 'No login activity matches these filters.')
+
+    def test_staff_forms_default_to_the_current_academic_period(self):
+        from .forms import (
+            AttendanceSelectionForm,
+            ReportCardForm,
+            ReportGenerationForm,
+            StudentForm,
+        )
+
+        self.assertEqual(
+            StudentForm().fields['academic_period'].initial, self.period)
+        self.assertEqual(
+            ReportGenerationForm().fields['academic_period'].initial,
+            self.period,
+        )
+        self.assertEqual(
+            ReportCardForm(user=self.teacher_user).fields[
+                'academic_period'].initial,
+            self.period,
+        )
+        self.assertEqual(
+            AttendanceSelectionForm().fields['academic_period'].initial,
+            self.period,
+        )
+
+    def test_admin_can_change_current_period_and_used_period_cannot_be_deleted(self):
+        next_period = AcademicPeriod.objects.create(year=2026, term=2)
+        response = self.client.post(reverse(
+            'set_current_academic_period', args=[next_period.pk]))
+        self.assertRedirects(
+            response, reverse('manage_academic_periods'),
+            fetch_redirect_response=False)
+        self.period.refresh_from_db()
+        next_period.refresh_from_db()
+        self.assertFalse(self.period.is_current)
+        self.assertTrue(next_period.is_current)
+
+        learner = CustomUser.objects.create_user(
+            username='period-delete-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        learner.student.academic_period = next_period
+        learner.student.save()
+        subject = Subject.objects.create(name='Period subject')
+        StudentResult.objects.create(
+            student=learner.student,
+            subject=subject,
+            test=10,
+            exam=20,
+        )
+        response = self.client.post(reverse(
+            'delete_academic_period', args=[next_period.pk]))
+        self.assertRedirects(
+            response, reverse('manage_academic_periods'),
+            fetch_redirect_response=False)
+        self.assertTrue(AcademicPeriod.objects.filter(pk=next_period.pk).exists())
+        self.assertContains(
+            self.client.get(reverse('manage_academic_periods')),
+            'cannot be deleted',
+        )
+
+    def test_xlsx_formula_cells_and_oversized_uploads_are_rejected(self):
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append([
+            'first_name', 'last_name', 'username', 'gender', 'course',
+        ])
+        worksheet.append(['=1+1', 'Learner', 'formula-xlsx', 'M', 'Grade 7'])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        formula_file = SimpleUploadedFile(
+            'formula.xlsx', buffer.getvalue())
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'upload',
+            'file': formula_file,
+        })
+        self.assertContains(response, 'Formula cells are not allowed')
+        self.assertFalse(response.context['preview_rows'])
+
+        with override_settings(SIMS_LEARNER_IMPORT_MAX_BYTES=4):
+            oversized = SimpleUploadedFile(
+                'too-large.csv',
+                b'first_name,last_name,username,gender,course',
+            )
+            response = self.client.post(reverse('import_learners'), {
+                'action': 'upload',
+                'file': oversized,
+            })
+        self.assertContains(response, 'exceeds the')

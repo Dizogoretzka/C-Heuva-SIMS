@@ -21,8 +21,8 @@
                                 <p class="form-control-plaintext">{{ student.course|default:"Not assigned" }}</p>
                             </div>
                             <div class="form-group">
-                                <label>Session / term</label>
-                                <p class="form-control-plaintext">{{ student.session|default:"Not assigned" }}</p>
+                                <label>Academic Period</label>
+                                <p class="form-control-plaintext">{{ student.academic_period|default:"Not assigned" }}</p>
                             </div>
                             {% for field in form %}
                             <div class="form-group">

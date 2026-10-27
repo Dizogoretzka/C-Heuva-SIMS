@@ -1,0 +1,66 @@
+{% extends "main_app/base.html" %}
+{% load static %}
+
+{% block page_title %}{{ page_title }}{% endblock %}
+
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-lg-4">
+                <div class="card card-primary">
+                    <div class="card-header"><h3 class="card-title">Add Academic Period</h3></div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <div class="card-body">
+                            {% for field in form %}
+                            <div class="form-group">
+                                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                                {{ field }}
+                                {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="card-footer">
+                            <button type="submit" class="btn btn-primary">Add Period</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            <div class="col-lg-8">
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">Academic Periods</h3></div>
+                    <div class="card-body table-responsive">
+                        <table class="table table-bordered table-striped">
+                            <thead><tr><th>Academic Period</th><th>Status</th><th>Actions</th></tr></thead>
+                            <tbody>
+                                {% for period in periods %}
+                                <tr>
+                                    <td>{{ period }}</td>
+                                    <td>{% if period.is_current %}<span class="badge badge-success">Current</span>{% else %}Not current{% endif %}</td>
+                                    <td>
+                                        <a class="btn btn-sm btn-outline-primary" href="{% url 'edit_academic_period' period.pk %}">Edit</a>
+                                        {% if not period.is_current %}
+                                        <form method="post" action="{% url 'set_current_academic_period' period.pk %}" class="d-inline">
+                                            {% csrf_token %}
+                                            <button class="btn btn-sm btn-primary" type="submit">Set Current</button>
+                                        </form>
+                                        {% endif %}
+                                        <form method="post" action="{% url 'delete_academic_period' period.pk %}" class="d-inline" onsubmit="return confirm('Delete this academic period?');">
+                                            {% csrf_token %}
+                                            <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+                                        </form>
+                                    </td>
+                                </tr>
+                                {% empty %}
+                                <tr><td colspan="3" class="text-center text-muted">No academic periods have been added.</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

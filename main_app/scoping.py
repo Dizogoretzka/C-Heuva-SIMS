@@ -9,7 +9,7 @@ def teacher_profile(user):
 
 def visible_students(user):
     students = Student.objects.select_related(
-        'admin', 'teacher__teacher', 'created_by__teacher', 'course', 'session')
+        'admin', 'teacher__teacher', 'created_by__teacher', 'course', 'academic_period')
     if user.user_type == '3':
         students = students.filter(teacher__teacher=user)
     return students
@@ -43,7 +43,7 @@ def visible_results(user):
 
 def visible_attendance(user):
     records = Attendance.objects.select_related(
-        'course', 'subject__teacher__teacher', 'session',
+        'course', 'subject__teacher__teacher', 'academic_period',
         'created_by__teacher')
     if user.user_type == '3':
         records = records.filter(

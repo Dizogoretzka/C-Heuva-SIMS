@@ -17,6 +17,10 @@ PUBLIC_URLS = {
 
 ADMIN_ONLY_URLS = {
     'admin_home',
+    'manage_academic_periods',
+    'edit_academic_period',
+    'set_current_academic_period',
+    'delete_academic_period',
     'learner_login_activity',
     'activity_log',
     'activity_user_timeline',
@@ -38,9 +42,6 @@ TEACHER_ONLY_URLS = {
     'manage_student_results',
     'edit_student_result',
     'delete_student_result',
-    'manage_grade_bands',
-    'edit_grade_band',
-    'delete_grade_band',
     'generate_report_card',
     'teacher_attendance',
 }
@@ -48,6 +49,8 @@ TEACHER_ONLY_URLS = {
 SHARED_STAFF_URLS = {
     'manage_student',
     'add_student',
+    'import_learners',
+    'download_learner_import_template',
     'edit_student',
     'delete_student',
     'manage_subject',

@@ -1,10 +1,14 @@
 import re
 
+from django.conf import settings
 from django import forms
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator
 from django.db.models import Q
 from django.forms.widgets import DateInput, TextInput
+from django.forms.formsets import BaseFormSet
+from django.forms import formset_factory
 
 from .credentials import verify_pin
 from .models import *
@@ -86,10 +90,13 @@ class StudentForm(CustomUserForm):
     def __init__(self, *args, **kwargs):
         super(StudentForm, self).__init__(*args, **kwargs)
         self.fields['course'].queryset = grade_ordered_courses()
+        if not self.is_bound and not self.instance.academic_period_id:
+            self.fields['academic_period'].initial = AcademicPeriod.objects.filter(
+                is_current=True).first()
 
     class Meta(CustomUserForm.Meta):
         model = Student
-        fields = CustomUserForm.Meta.fields + ['course', 'session']
+        fields = CustomUserForm.Meta.fields + ['course', 'academic_period']
 
 
 class AdminForm(CustomUserForm):
@@ -112,6 +119,9 @@ class SubjectForm(FormSettings):
 
 
 class StudentResultForm(FormSettings):
+    test = forms.FloatField(min_value=0)
+    exam = forms.FloatField(min_value=0, label='Exam score')
+
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
         if user and user.user_type == '3':
@@ -131,6 +141,18 @@ class StudentResultForm(FormSettings):
             self.add_error(
                 'subject',
                 "Choose a subject assigned to the learner's grade or school-wide.",
+            )
+        test = cleaned_data.get('test')
+        exam = cleaned_data.get('exam')
+        if (
+            test is not None
+            and exam is not None
+            and test + exam > settings.SIMS_MAX_TOTAL_SCORE
+        ):
+            self.add_error(
+                None,
+                'The test and examination scores cannot total more than '
+                f'{settings.SIMS_MAX_TOTAL_SCORE}.',
             )
         return cleaned_data
 
@@ -155,14 +177,17 @@ class ReportGenerationForm(forms.Form):
     report_type = forms.ChoiceField(choices=REPORT_TYPES, label='Report type')
     course = forms.ModelChoiceField(
         queryset=Course.objects.all(), required=False, label='Course / grade')
-    session = forms.ModelChoiceField(
-        queryset=Session.objects.all(), required=False, label='Session / term')
+    academic_period = forms.ModelChoiceField(
+        queryset=AcademicPeriod.objects.all(), required=False, label='Academic Period')
     subject = forms.ModelChoiceField(
         queryset=Subject.objects.all(), required=False, label='Subject')
 
     def __init__(self, *args, role='admin', user=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['course'].queryset = grade_ordered_courses()
+        if not self.is_bound:
+            self.fields['academic_period'].initial = (
+                AcademicPeriod.objects.filter(is_current=True).first())
         if role == 'teacher':
             self.fields['report_type'].choices = (
                 ('class_list', 'Class List'),
@@ -181,7 +206,7 @@ class ReportGenerationForm(forms.Form):
                 ('class_list', 'Class List'),
             )
         self.fields['report_type'].widget.attrs['class'] = 'form-control'
-        for name in ('course', 'session', 'subject'):
+        for name in ('course', 'academic_period', 'subject'):
             self.fields[name].widget.attrs['class'] = 'form-control'
         if self.is_bound:
             course_id = self.data.get('course')
@@ -202,8 +227,8 @@ class ReportGenerationForm(forms.Form):
 
         if report_type != 'school_summary' and not cleaned_data.get('course'):
             self.add_error('course', 'Choose a course or grade.')
-        if report_type != 'school_summary' and not cleaned_data.get('session'):
-            self.add_error('session', 'Choose a session or term.')
+        if report_type != 'school_summary' and not cleaned_data.get('academic_period'):
+            self.add_error('academic_period', 'Choose an academic period.')
         return cleaned_data
 
 
@@ -262,20 +287,114 @@ class ActivityLogFilterForm(forms.Form):
         return cleaned_data
 
 
-class GradeBandForm(forms.ModelForm):
-    class Meta:
-        model = GradeBand
-        fields = [
-            'symbol', 'minimum_score', 'maximum_score', 'description', 'remark',
-        ]
-        widgets = {
-            'remark': forms.Textarea(attrs={'rows': 2}),
-        }
+class GradeBandEntryForm(forms.Form):
+    from_score = forms.IntegerField(
+        required=False,
+        min_value=0,
+        label='From',
+        widget=forms.NumberInput(attrs={'step': 1}),
+    )
+    to_score = forms.IntegerField(
+        required=False,
+        min_value=0,
+        label='To',
+        widget=forms.NumberInput(attrs={'step': 1}),
+    )
+    symbol = forms.CharField(
+        required=False,
+        max_length=3,
+        label='Symbol',
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        maximum = settings.SIMS_MAX_TOTAL_SCORE
+        for name in ('from_score', 'to_score'):
+            self.fields[name].max_value = maximum
+            self.fields[name].validators.append(MaxValueValidator(maximum))
+        self.fields['from_score'].widget.attrs.update(
+            {'min': 0, 'max': maximum, 'step': 1})
+        self.fields['to_score'].widget.attrs.update(
+            {'min': 0, 'max': maximum, 'step': 1})
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        raw_values = [
+            self.data.get(self.add_prefix(name), '').strip()
+            for name in self.fields
+        ] if self.is_bound else []
+        if not any(raw_values):
+            return cleaned_data
+
+        for name in self.fields:
+            if not self.data.get(self.add_prefix(name), '').strip():
+                self.add_error(name, 'Complete all three fields in this row.')
+
+        minimum = cleaned_data.get('from_score')
+        maximum = cleaned_data.get('to_score')
+        if (
+            minimum is not None
+            and maximum is not None
+            and minimum > maximum
+        ):
+            self.add_error('to_score', 'To must be greater than or equal to From.')
+        if cleaned_data.get('symbol'):
+            cleaned_data['symbol'] = cleaned_data['symbol'].strip()
+            if not cleaned_data['symbol']:
+                self.add_error('symbol', 'Enter a symbol.')
+        return cleaned_data
+
+
+class GradeBandFormSet(BaseFormSet):
+    def clean(self):
+        super().clean()
+        if any(form.errors for form in self.forms):
+            return
+
+        populated = [
+            (index, form.cleaned_data)
+            for index, form in enumerate(self.forms, start=1)
+            if form.cleaned_data.get('symbol')
+        ]
+        if not populated:
+            raise forms.ValidationError('Enter at least one grade band.')
+
+        symbols = {}
+        for index, row in populated:
+            key = row['symbol'].casefold()
+            if key in symbols:
+                form = self.forms[index - 1]
+                other_form = self.forms[symbols[key] - 1]
+                form.add_error('symbol', 'This symbol is already used.')
+                other_form.add_error('symbol', 'This symbol is duplicated.')
+            else:
+                symbols[key] = index
+
+        ranges = sorted(
+            (row['from_score'], row['to_score'], index)
+            for index, row in populated
+        )
+        for position, (minimum, maximum, index) in enumerate(ranges):
+            for other_minimum, other_maximum, other_index in ranges[position + 1:]:
+                if other_minimum > maximum:
+                    break
+                self.forms[index - 1].add_error(
+                    'from_score',
+                    f'This range overlaps row {other_index}.')
+                self.forms[other_index - 1].add_error(
+                    'from_score',
+                    f'This range overlaps row {index}.')
+
+
+GradeBandFormSetFactory = formset_factory(
+    GradeBandEntryForm,
+    formset=GradeBandFormSet,
+    extra=8,
+    max_num=8,
+    validate_max=True,
+)
 
 
 class ReportCardForm(forms.Form):
@@ -284,13 +403,16 @@ class ReportCardForm(forms.Form):
             'admin__last_name', 'admin__first_name'),
         label='Learner',
     )
-    session = forms.ModelChoiceField(
-        queryset=Session.objects.order_by('-start_year'),
-        label='Session / term',
+    academic_period = forms.ModelChoiceField(
+        queryset=AcademicPeriod.objects.order_by('-start_year'),
+        label='Academic Period',
     )
 
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if not self.is_bound:
+            self.fields['academic_period'].initial = (
+                AcademicPeriod.objects.filter(is_current=True).first())
         if user and user.user_type == '3':
             self.fields['student'].queryset = Student.objects.filter(
                 teacher__teacher=user).select_related('admin').order_by(
@@ -308,9 +430,9 @@ class AttendanceSelectionForm(forms.Form):
         queryset=Subject.objects.order_by('name'),
         label='Subject',
     )
-    session = forms.ModelChoiceField(
-        queryset=Session.objects.order_by('-start_year'),
-        label='Session / term',
+    academic_period = forms.ModelChoiceField(
+        queryset=AcademicPeriod.objects.order_by('-start_year'),
+        label='Academic Period',
     )
     date = forms.DateField(
         widget=DateInput(attrs={'type': 'date'}),
@@ -319,6 +441,9 @@ class AttendanceSelectionForm(forms.Form):
 
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        if not self.is_bound:
+            self.fields['academic_period'].initial = (
+                AcademicPeriod.objects.filter(is_current=True).first())
         if user and user.user_type == '3':
             self.fields['course'].queryset = grade_ordered_courses().filter(
                 student__teacher__teacher=user).distinct()
@@ -337,6 +462,83 @@ class AttendanceSelectionForm(forms.Form):
                 self.fields['subject'].queryset = self.fields[
                     'subject'].queryset.filter(
                         Q(teacher__teacher=user) | Q(teacher__isnull=True))
+        for field in self.fields.values():
+            field.widget.attrs['class'] = 'form-control'
+
+
+class AcademicPeriodForm(FormSettings):
+    class Meta:
+        model = AcademicPeriod
+        fields = ['term', 'year']
+        widgets = {
+            'year': forms.NumberInput(attrs={'min': 1, 'step': 1}),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['year'].required = not self.instance.pk
+        self.fields['term'].required = not self.instance.pk
+
+    def clean(self):
+        cleaned_data = super().clean()
+        year = cleaned_data.get('year')
+        term = cleaned_data.get('term')
+        if (year is None) != (term is None):
+            message = 'Choose both the year and term.'
+            if year is None:
+                self.add_error('year', message)
+            if term is None:
+                self.add_error('term', message)
+        elif year is None and not self.instance.pk:
+            self.add_error('year', 'Choose a year and term.')
+            self.add_error('term', 'Choose a year and term.')
+        return cleaned_data
+
+
+class LearnerImportUploadForm(forms.Form):
+    file = forms.FileField(
+        label='Learner CSV or XLSX file',
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        maximum_bytes = settings.SIMS_LEARNER_IMPORT_MAX_BYTES
+        maximum_megabytes = maximum_bytes / (1024 * 1024)
+        self.fields['file'].help_text = (
+            f'Maximum size: {maximum_megabytes:g} MB.')
+
+    def clean_file(self):
+        uploaded_file = self.cleaned_data['file']
+        if uploaded_file.size > settings.SIMS_LEARNER_IMPORT_MAX_BYTES:
+            maximum_megabytes = (
+                settings.SIMS_LEARNER_IMPORT_MAX_BYTES / (1024 * 1024))
+            raise ValidationError(
+                f'The upload exceeds the {maximum_megabytes:g} MB file-size '
+                'limit.')
+        if uploaded_file.name.rsplit('.', 1)[-1].lower() not in ('csv', 'xlsx'):
+            raise ValidationError('Choose a .csv or .xlsx file.')
+        return uploaded_file
+
+
+class LearnerImportOptionsForm(forms.Form):
+    academic_period = forms.ModelChoiceField(
+        queryset=AcademicPeriod.objects.order_by('-year', 'term'),
+        label='Academic Period',
+    )
+    teacher = forms.ModelChoiceField(
+        queryset=Teacher.objects.select_related('teacher').order_by(
+            'teacher__last_name', 'teacher__first_name'),
+        required=False,
+        label='Assign learners to teacher',
+    )
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.is_bound:
+            self.fields['academic_period'].initial = (
+                AcademicPeriod.objects.filter(is_current=True).first())
+        if user and user.user_type == '3':
+            self.fields.pop('teacher')
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 

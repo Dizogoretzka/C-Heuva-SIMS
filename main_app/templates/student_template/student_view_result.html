@@ -57,8 +57,13 @@
         {% endfor %}
         </table>
         {% if has_report_card %}
-        <a class="btn btn-primary mb-3" href="{% url 'student_report_card' %}">
-            <i class="fas fa-file-pdf mr-1"></i> Download report card
+        <a class="btn btn-primary mb-3" href="{% url 'student_report_card' %}?export=pdf"
+           data-export-trigger>
+            <i class="fas fa-file-pdf mr-1"></i> Download PDF
+        </a>
+        <a class="btn btn-outline-success mb-3" href="{% url 'student_report_card' %}?export=csv"
+           data-export-trigger>
+            <i class="fas fa-file-csv mr-1"></i> Download CSV
         </a>
         {% endif %}
         <div class="alert alert-light d-none" data-search-empty-for="#learner-results-list">

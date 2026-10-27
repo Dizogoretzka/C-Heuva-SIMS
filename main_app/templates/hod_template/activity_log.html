@@ -24,8 +24,14 @@
                             Clear
                         </a>
                         <a class="btn btn-outline-success"
-                           href="?{% if query_params %}{{ query_params }}&amp;{% endif %}export=csv">
-                            Export CSV
+                           href="?{% if query_params %}{{ query_params }}&amp;{% endif %}export=csv"
+                           data-export-trigger>
+                            Download CSV
+                        </a>
+                        <a class="btn btn-outline-primary"
+                           href="?{% if query_params %}{{ query_params }}&amp;{% endif %}export=pdf"
+                           data-export-trigger>
+                            Download PDF
                         </a>
                     </div>
                 </form>

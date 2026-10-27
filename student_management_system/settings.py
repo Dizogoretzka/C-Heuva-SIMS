@@ -92,6 +92,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'main_app.context_processors.current_academic_period',
             ],
         },
     },
@@ -146,6 +147,12 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 
 USE_TZ = True
+
+SIMS_MAX_TOTAL_SCORE = int(os.environ.get('SIMS_MAX_TOTAL_SCORE', '100'))
+SIMS_LEARNER_IMPORT_MAX_BYTES = int(
+    os.environ.get('SIMS_LEARNER_IMPORT_MAX_BYTES', str(2 * 1024 * 1024)))
+SIMS_LEARNER_IMPORT_MAX_ROWS = int(
+    os.environ.get('SIMS_LEARNER_IMPORT_MAX_ROWS', '500'))
 
 
 # Static files (CSS, JavaScript, Images)

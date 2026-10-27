@@ -27,6 +27,10 @@ def unavailable_admin_password_change(request):
     raise Http404
 
 
+def unavailable_grade_band_routes(request):
+    raise Http404
+
+
 def serve_static_asset(request, path):
     if not django_settings.DEBUG:
         raise Http404
@@ -51,6 +55,10 @@ urlpatterns = [
         unavailable_admin_password_change,
     ),
     path("", include('main_app.urls')),
+    re_path(
+        r'^admin/grade-bands(?:/.*)?$',
+        unavailable_grade_band_routes,
+    ),
     path('admin/', admin.site.urls),
 ]
 

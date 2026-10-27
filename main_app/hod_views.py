@@ -1,6 +1,7 @@
 import json
 import logging
 import csv
+import secrets
 from datetime import date
 from io import BytesIO
 from pathlib import Path
@@ -21,6 +22,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.templatetags.static import static
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -31,6 +33,11 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from .forms import *
 from .credentials import issue_pin
 from .grading import get_grade_band
+from .learner_imports import (
+    LearnerImportError,
+    parse_learner_upload,
+    validate_learner_rows,
+)
 from .models import *
 from .scoping import (
     teacher_profile,
@@ -63,6 +70,90 @@ def admin_home(request):
 
 
 @login_required
+def manage_academic_periods(request):
+    if request.user.user_type != '1':
+        return redirect(reverse('admin_home'))
+
+    form = AcademicPeriodForm(request.POST or None)
+    if request.method == 'POST' and form.is_valid():
+        period = form.save(commit=False)
+        if not AcademicPeriod.objects.filter(is_current=True).exists():
+            period.is_current = True
+        period.save()
+        messages.success(request, 'Academic period added successfully.')
+        return redirect(reverse('manage_academic_periods'))
+
+    periods = AcademicPeriod.objects.order_by(
+        '-year', 'term', '-start_year', '-pk')
+    return render(request, 'hod_template/manage_academic_periods.html', {
+        'form': form,
+        'periods': periods,
+        'page_title': 'Manage Academic Periods',
+    })
+
+
+@login_required
+def edit_academic_period(request, period_id):
+    if request.user.user_type != '1':
+        return redirect(reverse('admin_home'))
+
+    period = get_object_or_404(AcademicPeriod, pk=period_id)
+    form = AcademicPeriodForm(request.POST or None, instance=period)
+    if request.method == 'POST' and form.is_valid():
+        form.save()
+        messages.success(request, 'Academic period updated successfully.')
+        return redirect(reverse('manage_academic_periods'))
+    return render(request, 'hod_template/edit_academic_period.html', {
+        'form': form,
+        'period': period,
+        'page_title': 'Edit Academic Period',
+    })
+
+
+@login_required
+def set_current_academic_period(request, period_id):
+    if request.user.user_type != '1':
+        return redirect(reverse('admin_home'))
+    if request.method == 'POST':
+        with transaction.atomic():
+            current = AcademicPeriod.objects.filter(is_current=True).first()
+            period = get_object_or_404(AcademicPeriod, pk=period_id)
+            if current and current.pk != period.pk:
+                current.is_current = False
+                current.save(update_fields=['is_current'])
+            if not period.is_current:
+                period.is_current = True
+                period.save(update_fields=['is_current'])
+        messages.success(
+            request, f'{period} is now the current academic period.')
+    return redirect(reverse('manage_academic_periods'))
+
+
+@login_required
+def delete_academic_period(request, period_id):
+    if request.user.user_type != '1':
+        return redirect(reverse('admin_home'))
+    period = get_object_or_404(AcademicPeriod, pk=period_id)
+    if request.method == 'POST':
+        has_results = Student.objects.filter(
+            academic_period=period,
+            studentresult__isnull=False,
+        ).exists()
+        has_attendance = Attendance.objects.filter(
+            academic_period=period).exists()
+        if has_results or has_attendance:
+            messages.error(
+                request,
+                'This academic period cannot be deleted because it has '
+                'results or attendance.',
+            )
+        else:
+            period.delete()
+            messages.success(request, 'Academic period deleted successfully.')
+    return redirect(reverse('manage_academic_periods'))
+
+
+@login_required
 def learner_login_activity(request):
     if request.user.user_type != '1':
         return redirect(reverse('student_home'))
@@ -86,10 +177,39 @@ def learner_login_activity(request):
         if course:
             activities = activities.filter(student__course=course)
 
+    export_format = request.GET.get('export')
+    if export_format in ('pdf', 'csv') and not filter_form.is_valid():
+        return HttpResponse(
+            'Invalid learner-login filters.', status=400,
+            content_type='text/plain',
+        )
+    if export_format in ('pdf', 'csv'):
+        headers = ['Learner', 'Username', 'Course / grade', 'Date and time']
+        rows = [[
+            activity.student.admin.get_full_name()
+            or activity.student.admin.username,
+            activity.student.admin.username,
+            activity.student.course or 'Not assigned',
+            activity.logged_in_at.strftime('%Y-%m-%d %H:%M:%S'),
+        ] for activity in activities]
+        if not rows:
+            messages.warning(
+                request, 'No login activity matches these filters.')
+        else:
+            return _export_data(
+                request,
+                request.user,
+                'Learner Login Activity',
+                headers,
+                rows,
+                export_format,
+            )
+
     paginator = Paginator(activities, 25)
     page_obj = paginator.get_page(request.GET.get('page'))
     query_params = request.GET.copy()
     query_params.pop('page', None)
+    query_params.pop('export', None)
     context = {
         'page_title': 'Learner Login Activity',
         'filter_form': filter_form,
@@ -133,24 +253,20 @@ def activity_log(request, user_id=None):
             activities = activities.filter(created_at__date__lte=end_date)
     activities = activities.order_by('-created_at', '-pk')
 
-    if request.GET.get('export') == 'csv' and not filter_valid:
+    export_format = request.GET.get('export')
+    if export_format in ('pdf', 'csv') and not filter_valid:
         return HttpResponse(
             'Invalid activity-log filters.', status=400,
             content_type='text/plain',
         )
 
-    if request.GET.get('export') == 'csv':
-        response = HttpResponse(content_type='text/csv')
-        response['Content-Disposition'] = (
-            'attachment; filename="sims-activity-log.csv"')
-        writer = csv.writer(response)
-        writer.writerow([
+    if export_format in ('pdf', 'csv'):
+        headers = [
             'Timestamp', 'Actor', 'Action', 'Record type', 'Record ID',
             'Target user', 'Target user ID', 'Description', 'Changes',
             'IP address',
-        ])
-        for item in activities.iterator():
-            writer.writerow([
+        ]
+        rows = [[
                 item.created_at.isoformat(),
                 item.actor_username,
                 item.get_action_display(),
@@ -161,8 +277,15 @@ def activity_log(request, user_id=None):
                 item.description,
                 json.dumps(item.changes, sort_keys=True),
                 item.ip_address or '',
-            ])
-        return response
+            ] for item in activities]
+        if not rows:
+            messages.warning(request, 'No activity found for these filters.')
+        else:
+            title = (
+                f'Activity Timeline {target_user.get_username()}'
+                if target_user else 'Activity Log')
+            return _export_data(
+                request, request.user, title, headers, rows, export_format)
 
     paginator = Paginator(activities, 50)
     page_obj = paginator.get_page(request.GET.get('page'))
@@ -183,6 +306,25 @@ def activity_log(request, user_id=None):
 def manage_teachers(request):
     teachers = Teacher.objects.select_related('teacher').order_by(
         'teacher__last_name', 'teacher__first_name')
+    export_format = request.GET.get('export')
+    if export_format in ('pdf', 'csv'):
+        rows = [[
+            profile.teacher.get_full_name()
+            or profile.teacher.username,
+            profile.teacher.username,
+            profile.teacher.get_gender_display(),
+        ] for profile in teachers]
+        if not rows:
+            messages.warning(request, 'No teachers are available to export.')
+        else:
+            return _export_data(
+                request,
+                request.user,
+                'Teacher List',
+                ['Teacher name', 'Username', 'Gender'],
+                rows,
+                export_format,
+            )
     return render(request, 'hod_template/manage_teachers.html', {
         'teachers': teachers,
         'page_title': 'Manage Teachers',
@@ -421,80 +563,132 @@ def generate_report(request):
         return redirect(reverse('admin_home'))
 
     role = 'teacher' if request.user.user_type == '3' else 'admin'
+    bands = list(GradeBand.objects.order_by('minimum_score', 'maximum_score'))
+    if request.user.user_type == '3':
+        initial_bands = [
+            {
+                'from_score': band.minimum_score,
+                'to_score': band.maximum_score,
+                'symbol': band.symbol,
+            }
+            for band in bands[:8]
+        ]
+        if (
+            request.method == 'POST'
+            and request.POST.get('action') == 'save_grade_bands'
+        ):
+            grade_band_formset = GradeBandFormSetFactory(
+                request.POST, prefix='bands')
+            form = ReportGenerationForm(
+                role=role, user=request.user)
+            if grade_band_formset.is_valid():
+                rows = [
+                    form.cleaned_data
+                    for form in grade_band_formset.forms
+                    if form.cleaned_data.get('symbol')
+                ]
+                with transaction.atomic():
+                    GradeBand.objects.all().delete()
+                    for row in rows:
+                        GradeBand.objects.create(
+                            symbol=row['symbol'],
+                            minimum_score=row['from_score'],
+                            maximum_score=row['to_score'],
+                        )
+                messages.success(request, 'Grade bands saved successfully.')
+                gaps = _grade_band_gaps(rows)
+                if gaps:
+                    messages.warning(
+                        request,
+                        'Some score ranges are not covered: '
+                        + ', '.join(f'{start}-{end}' for start, end in gaps)
+                        + '.',
+                    )
+                return redirect(reverse('generate_report'))
+        else:
+            grade_band_formset = GradeBandFormSetFactory(
+                initial=initial_bands, prefix='bands')
+    else:
+        grade_band_formset = None
+
+    form_data = (
+        request.POST
+        if request.method == 'POST'
+        and request.POST.get('action') != 'save_grade_bands'
+        else None
+    )
     form = ReportGenerationForm(
-        request.POST or None, role=role, user=request.user)
-    context = {'form': form, 'page_title': 'Generate Report'}
+        form_data, role=role, user=request.user)
+    context = {
+        'form': form,
+        'grade_band_formset': grade_band_formset,
+        'grade_band_gaps': _grade_band_gaps(bands),
+        'score_maximum': settings.SIMS_MAX_TOTAL_SCORE,
+        'show_grade_band_form': bool(
+            request.method == 'POST'
+            and request.POST.get('action') == 'save_grade_bands'
+            and grade_band_formset is not None
+            and not grade_band_formset.is_valid()
+        ),
+        'page_title': 'Generate Report',
+    }
     if request.method != 'POST' or not form.is_valid():
         return render(request, 'hod_template/generate_report.html', context)
 
     report_type = form.cleaned_data['report_type']
     course = form.cleaned_data.get('course')
-    session = form.cleaned_data.get('session')
+    academic_period = form.cleaned_data.get('academic_period')
     subject = form.cleaned_data.get('subject')
 
     title, headers, rows = _report_data(
-        report_type, course, session, subject, user=request.user)
+        report_type, course, academic_period, subject, user=request.user)
     if not rows:
         messages.warning(
             request, 'There is no data for the selected report options.')
         return render(request, 'hod_template/generate_report.html', context)
 
-    return _create_report_pdf(request.user, title, headers, rows)
+    export_format = request.POST.get('export_format', 'pdf')
+    if export_format not in ('pdf', 'csv'):
+        return HttpResponse('Unsupported export format.', status=400)
+    return _export_data(
+        request,
+        request.user,
+        title,
+        headers,
+        rows,
+        export_format,
+        academic_period=academic_period,
+    )
 
 
-@login_required
-def manage_grade_bands(request):
-    if request.user.user_type != '3':
-        return redirect(reverse('admin_home'))
-
-    form = GradeBandForm(request.POST or None)
-    if request.method == 'POST' and form.is_valid():
-        form.save()
-        messages.success(request, 'Grade band added successfully.')
-        return redirect(reverse('manage_grade_bands'))
-
-    bands = list(GradeBand.objects.order_by('minimum_score', 'maximum_score'))
-    gaps = [
-        (bands[index - 1].maximum_score, bands[index].minimum_score)
-        for index in range(1, len(bands))
-        if bands[index].minimum_score > bands[index - 1].maximum_score
-    ]
-    return render(request, 'hod_template/manage_grade_bands.html', {
-        'form': form,
-        'bands': bands,
-        'gaps': gaps,
-        'page_title': 'Grade Bands',
-    })
-
-
-@login_required
-def edit_grade_band(request, band_id):
-    if request.user.user_type != '3':
-        return redirect(reverse('admin_home'))
-
-    band = get_object_or_404(GradeBand, pk=band_id)
-    form = GradeBandForm(request.POST or None, instance=band)
-    if request.method == 'POST' and form.is_valid():
-        form.save()
-        messages.success(request, 'Grade band updated successfully.')
-        return redirect(reverse('manage_grade_bands'))
-    return render(request, 'hod_template/edit_grade_band.html', {
-        'form': form,
-        'band': band,
-        'page_title': 'Edit Grade Band',
-    })
-
-
-@login_required
-def delete_grade_band(request, band_id):
-    if request.user.user_type != '3':
-        return redirect(reverse('admin_home'))
-
-    band = get_object_or_404(GradeBand, pk=band_id)
-    if request.method == 'POST':
-        band.delete()
-        messages.success(request, 'Grade band deleted successfully.')
-    return redirect(reverse('manage_grade_bands'))
+def _grade_band_gaps(bands):
+    maximum_score = settings.SIMS_MAX_TOTAL_SCORE
+    ordered_bands = sorted(
+        bands,
+        key=lambda band: (
+            band.minimum_score if isinstance(band, GradeBand)
+            else band['from_score'],
+            band.maximum_score if isinstance(band, GradeBand)
+            else band['to_score'],
+        ),
+    )
+    gaps = []
+    next_score = 0
+    for band in ordered_bands:
+        minimum = (
+            band.minimum_score if isinstance(band, GradeBand)
+            else band['from_score']
+        )
+        maximum = (
+            band.maximum_score if isinstance(band, GradeBand)
+            else band['to_score']
+        )
+        if minimum > next_score:
+            gaps.append((next_score, min(minimum - 1, maximum_score)))
+        next_score = max(next_score, maximum + 1)
+    if next_score <= maximum_score:
+        gaps.append((next_score, maximum_score))
+    return gaps
 
 
 @login_required
@@ -504,15 +698,20 @@ def generate_report_card(request):
 
     form = ReportCardForm(request.POST or None, user=request.user)
     if request.method == 'POST' and form.is_valid():
+        export_format = request.POST.get('export_format', 'pdf')
+        if export_format not in ('pdf', 'csv'):
+            return HttpResponse('Unsupported export format.', status=400)
         response = _report_card_pdf(
+            request,
             request.user,
             form.cleaned_data['student'],
-            form.cleaned_data['session'],
+            form.cleaned_data['academic_period'],
+            export_format=export_format,
         )
         if response is not None:
             return response
         messages.warning(
-            request, 'There are no results for this learner and session / term.')
+            request, 'There are no results for this learner and academic period.')
 
     return render(request, 'hod_template/generate_report_card.html', {
         'form': form,
@@ -520,10 +719,11 @@ def generate_report_card(request):
     })
 
 
-def _report_card_pdf(user, student, session):
+def _report_card_pdf(
+        request, user, student, academic_period, export_format='pdf'):
     results_queryset = StudentResult.objects.filter(
         student=student,
-        student__session=session,
+        student__academic_period=academic_period,
     )
     if user.user_type == '3':
         if student.teacher_id != user.teacher.pk:
@@ -553,7 +753,8 @@ def _report_card_pdf(user, student, session):
             band.remark if isinstance(band, GradeBand) else '',
         ])
 
-    return _create_report_pdf(
+    return _export_data(
+        request,
         user,
         'Learner Report Card',
         [
@@ -561,11 +762,12 @@ def _report_card_pdf(user, student, session):
             'Grade', 'Description', 'Band remark',
         ],
         rows,
-        filename='learner-report-card.pdf',
+        export_format,
+        academic_period=academic_period,
         preamble=[
             f'<b>Learner:</b> {escape(student.admin.get_full_name().strip() or student.admin.username)}',
             f'<b>Course / grade:</b> {escape(str(student.course) if student.course else "Not assigned")}',
-            f'<b>Session / term:</b> {escape(str(session))}',
+            f'<b>Academic Period:</b> {escape(str(academic_period))}',
         ],
         postamble=[
             f'<b>Overall average total:</b> {sum(totals) / len(totals):.2f}',
@@ -577,7 +779,7 @@ def _report_card_pdf(user, student, session):
     )
 
 
-def _report_data(report_type, course, session, subject, user=None):
+def _report_data(report_type, course, academic_period, subject, user=None):
     students = visible_students(user) if user else Student.objects.all()
     subjects = visible_subjects(user) if user else Subject.objects.all()
     results_queryset = visible_results(user) if user else StudentResult.objects.all()
@@ -603,17 +805,17 @@ def _report_data(report_type, course, session, subject, user=None):
 
     if report_type == 'class_list':
         learners = students.filter(
-            course=course, session=session
+            course=course, academic_period=academic_period
         ).select_related('admin').order_by('admin__last_name', 'admin__first_name')
         rows = [[f'{learner.admin.first_name} {learner.admin.last_name}',
                  learner.admin.username] for learner in learners]
-        return f'Class List - {course.name} - {session}', [
+        return f'Class List - {course.name} - {academic_period}', [
             'Learner name', 'Username'], rows
 
     if report_type == 'learner_results':
         results = results_queryset.filter(
             student__course=course,
-            student__session=session,
+            student__academic_period=academic_period,
         ).filter(
             Q(subject__course=course) | Q(subject__course__isnull=True)
         ).select_related('student__admin', 'subject').order_by(
@@ -627,17 +829,17 @@ def _report_data(report_type, course, session, subject, user=None):
             f'{result.exam:g}',
             f'{result.test + result.exam:g}',
         ] for result in results]
-        return f'Learner Results - {course.name} - {session}', [
+        return f'Learner Results - {course.name} - {academic_period}', [
             'Learner name', 'Subject', 'Test / CA', 'Exam', 'Total'], rows
 
     if report_type == 'attendance_summary':
         learner_queryset = students.filter(
             course=course,
-            session=session,
+            academic_period=academic_period,
         ).select_related('admin')
         attendance_scope = Q(
             attendance_records__attendance__course=course,
-            attendance_records__attendance__session=session,
+            attendance_records__attendance__academic_period=academic_period,
         )
         if user and user.user_type == '3':
             attendance_scope &= (
@@ -666,7 +868,7 @@ def _report_data(report_type, course, session, subject, user=None):
                 str(absent_count),
                 f'{percentage:.1f}%',
             ])
-        return f'Attendance Summary - {course.name} - {session}', [
+        return f'Attendance Summary - {course.name} - {academic_period}', [
             'Learner', 'Present', 'Absent', 'Attendance'], rows
 
     raise ValueError(f'Unsupported report type: {report_type}')
@@ -713,6 +915,8 @@ def _create_report_pdf(
                          available_width * 0.12, available_width * 0.10,
                          available_width * 0.08, available_width * 0.18,
                          available_width * 0.20]
+    elif len(headers) >= 8:
+        column_widths = [available_width / len(headers)] * len(headers)
     else:
         column_widths = [available_width * 0.32, available_width * 0.25,
                          available_width * 0.15, available_width * 0.14,
@@ -782,6 +986,68 @@ def _create_report_pdf(
     return response
 
 
+def _export_data(
+        request, user, title, headers, rows, export_format,
+        academic_period=None, preamble=None, postamble=None):
+    if not rows:
+        return None
+    if export_format not in ('pdf', 'csv'):
+        raise ValueError(f'Unsupported export format: {export_format}')
+
+    period = academic_period or AcademicPeriod.objects.filter(
+        is_current=True).first()
+    filename_slug = slugify(title) or 'sims-export'
+    period_slug = slugify(str(period)) if period else 'academic-period-unset'
+    if period_slug not in filename_slug:
+        filename_slug = f'{filename_slug}-{period_slug}'
+    filename = f'{filename_slug}.{export_format}'
+
+    if export_format == 'pdf':
+        response = _create_report_pdf(
+            user,
+            title,
+            headers,
+            rows,
+            filename=filename,
+            preamble=preamble,
+            postamble=postamble,
+        )
+    else:
+        response = HttpResponse(
+            content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="{filename}"')
+        response.write('\ufeff')
+        writer = csv.writer(response)
+        writer.writerow([_csv_safe(value) for value in headers])
+        writer.writerows([
+            [_csv_safe(value) for value in row]
+            for row in rows
+        ])
+
+    ActivityLog.objects.create(
+        actor=user,
+        actor_username=user.get_username() or '',
+        action='export',
+        object_type='data_export',
+        object_id='',
+        description=f'Exported {title} as {export_format.upper()}'[:255],
+        changes={
+            'format': export_format,
+            'row_count': len(rows),
+        },
+        ip_address=request.META.get('REMOTE_ADDR'),
+    )
+    return response
+
+
+def _csv_safe(value):
+    cell = '' if value is None else str(value)
+    if cell.lstrip().startswith(('=', '+', '-', '@')):
+        return "'" + cell
+    return cell
+
+
 def _report_crest_path():
     relative_path = 'main_app/img/crest-logo.png'
     crest_path = finders.find(relative_path)
@@ -831,7 +1097,7 @@ def add_student(request):
                 )
                 student = user.student
                 student.course = student_form.cleaned_data.get('course')
-                student.session = student_form.cleaned_data.get('session')
+                student.academic_period = student_form.cleaned_data.get('academic_period')
                 if request.user.user_type == '3':
                     teacher = teacher_profile(request.user)
                     student.teacher = teacher
@@ -890,15 +1156,49 @@ def _render_manage_students(request, student_form=None, open_modal=None):
         if filter_form.cleaned_data['course']:
             students = students.filter(
                 course=filter_form.cleaned_data['course'])
+    learner_accounts = CustomUser.objects.filter(
+        pk__in=students.values('admin_id')).select_related(
+            'student__teacher__teacher',
+            'student__created_by__teacher',
+            'student__course',
+            'student__academic_period',
+    ).order_by('last_name', 'first_name')
+    export_query_params = request.GET.copy()
+    export_query_params.pop('export', None)
+    export_query_params.pop('page', None)
+    export_format = request.GET.get('export')
+    if export_format in ('pdf', 'csv'):
+        rows = [[
+            account.get_full_name() or account.username,
+            account.username,
+            account.get_gender_display(),
+            account.student.course or 'Not assigned',
+            account.student.academic_period or 'Not assigned',
+            account.student.teacher or 'Unassigned',
+        ] for account in learner_accounts]
+        if not rows:
+            messages.warning(request, 'No learners are available to export.')
+        else:
+            return _export_data(
+                request,
+                request.user,
+                'Learner List',
+                [
+                    'Learner name', 'Username', 'Gender', 'Course / grade',
+                    'Academic Period', 'Assigned teacher',
+                ],
+                rows,
+                export_format,
+            )
+    elif export_format:
+        return HttpResponse('Unsupported export format.', status=400)
+
     context = {
-        'students': CustomUser.objects.filter(
-            pk__in=students.values('admin_id')).select_related(
-                'student__teacher__teacher',
-                'student__created_by__teacher',
-                'student__course'),
+        'students': learner_accounts,
         'student_form': student_form,
         'filter_form': filter_form,
         'open_modal': open_modal,
+        'export_query_params': export_query_params.urlencode(),
         'page_title': 'Manage Learners',
     }
     return render(request, "hod_template/manage_student.html", context)
@@ -936,6 +1236,174 @@ def manage_student(request):
     return _render_manage_students(request)
 
 
+@login_required
+def import_learners(request):
+    if request.user.user_type not in ('1', '3'):
+        return redirect(reverse('login_page'))
+
+    upload_form = LearnerImportUploadForm()
+    options_form = LearnerImportOptionsForm(user=request.user)
+    if request.method == 'POST' and request.POST.get('action') == 'upload':
+        request.session.pop('learner_import_preview', None)
+        upload_form = LearnerImportUploadForm(request.POST, request.FILES)
+        if upload_form.is_valid():
+            try:
+                preview_rows = parse_learner_upload(
+                    upload_form.cleaned_data['file'])
+            except LearnerImportError as error:
+                upload_form.add_error('file', str(error))
+            else:
+                token = secrets.token_urlsafe(24)
+                request.session['learner_import_preview'] = {
+                    'token': token,
+                    'created_at': timezone.now().timestamp(),
+                    'rows': preview_rows,
+                }
+                options_form = LearnerImportOptionsForm(user=request.user)
+                return render(request, 'hod_template/import_learners.html', {
+                    'upload_form': LearnerImportUploadForm(),
+                    'options_form': options_form,
+                    'preview_rows': preview_rows,
+                    'preview_token': token,
+                    'preview_has_errors': any(
+                        row['errors'] for row in preview_rows),
+                    'max_rows': settings.SIMS_LEARNER_IMPORT_MAX_ROWS,
+                    'page_title': 'Import Learners',
+                })
+
+    if request.method == 'POST' and request.POST.get('action') == 'confirm':
+        preview = request.session.get('learner_import_preview')
+        supplied_token = request.POST.get('preview_token', '')
+        if (
+            not preview
+            or timezone.now().timestamp() - preview.get('created_at', 0) > 900
+            or not secrets.compare_digest(
+                preview.get('token', ''), supplied_token)
+        ):
+            request.session.pop('learner_import_preview', None)
+            messages.error(
+                request,
+                'This import preview expired. Upload the file again.')
+            return redirect(reverse('import_learners'))
+
+        options_form = LearnerImportOptionsForm(
+            request.POST, user=request.user)
+        preview_rows = validate_learner_rows(preview['rows'])
+        request.session['learner_import_preview']['rows'] = preview_rows
+        if options_form.is_valid() and not any(
+            row['errors'] for row in preview_rows
+        ):
+            period = options_form.cleaned_data.get('academic_period')
+            teacher = (
+                options_form.cleaned_data.get('teacher')
+                if request.user.user_type == '1'
+                else teacher_profile(request.user)
+            )
+            created_by = (
+                teacher if request.user.user_type == '3' else None)
+            credentials = []
+            with transaction.atomic():
+                for row in preview_rows:
+                    data = row['data']
+                    password = secrets.token_urlsafe(16)
+                    user = CustomUser.objects.create_user(
+                        username=data['username'],
+                        password=password,
+                        user_type='2',
+                        first_name=data['first_name'],
+                        last_name=data['last_name'],
+                        gender=data['gender'],
+                        email='',
+                        address='',
+                    )
+                    student = user.student
+                    student.course_id = data['course_id']
+                    student.academic_period = period
+                    student.teacher = teacher
+                    student.created_by = created_by
+                    student.save()
+                    credentials.append({
+                        'name': user.get_full_name() or user.username,
+                        'username': user.username,
+                        'password': password,
+                    })
+
+                ActivityLog.objects.create(
+                    actor=request.user,
+                    actor_username=request.user.get_username() or '',
+                    action='import',
+                    object_type='learner_import',
+                    description=f'Imported {len(credentials)} learners.',
+                    changes={'row_count': len(credentials)},
+                    ip_address=request.META.get('REMOTE_ADDR'),
+                )
+            request.session.pop('learner_import_preview', None)
+            response = render(
+                request,
+                'hod_template/import_learner_credentials.html',
+                {
+                    'credentials': credentials,
+                    'page_title': 'Learner Import Complete',
+                },
+            )
+            response['Cache-Control'] = (
+                'no-store, no-cache, must-revalidate, private')
+            response['Pragma'] = 'no-cache'
+            return response
+
+    preview = request.session.get('learner_import_preview')
+    preview_rows = preview.get('rows', []) if preview else []
+    preview_token = preview.get('token', '') if preview else ''
+    context = {
+        'upload_form': upload_form,
+        'options_form': options_form,
+        'preview_rows': preview_rows,
+        'preview_token': preview_token,
+        'preview_has_errors': any(
+            row['errors'] for row in preview_rows),
+        'max_rows': settings.SIMS_LEARNER_IMPORT_MAX_ROWS,
+        'page_title': 'Import Learners',
+    }
+    return render(request, 'hod_template/import_learners.html', context)
+
+
+@login_required
+def download_learner_import_template(request):
+    if request.user.user_type not in ('1', '3'):
+        return redirect(reverse('login_page'))
+
+    export_format = request.GET.get('format', 'csv').lower()
+    if export_format == 'csv':
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            'attachment; filename="learner-import-template.csv"')
+        response.write('\ufeff')
+        csv.writer(response).writerow([
+            'first_name', 'last_name', 'username', 'gender', 'course',
+        ])
+        return response
+    if export_format == 'xlsx':
+        from openpyxl import Workbook
+
+        workbook = Workbook(write_only=True)
+        worksheet = workbook.create_sheet('Learners')
+        worksheet.append([
+            'first_name', 'last_name', 'username', 'gender', 'course',
+        ])
+        buffer = BytesIO()
+        workbook.save(buffer)
+        response = HttpResponse(
+            buffer.getvalue(),
+            content_type=(
+                'application/vnd.openxmlformats-officedocument.'
+                'spreadsheetml.sheet'),
+        )
+        response['Content-Disposition'] = (
+            'attachment; filename="learner-import-template.xlsx"')
+        return response
+    return HttpResponse('Unsupported template format.', status=400)
+
+
 def manage_subject(request):
     return _render_manage_subjects(request)
 
@@ -962,7 +1430,7 @@ def edit_student(request, student_id):
             gender = form.cleaned_data.get('gender')
             password = form.cleaned_data.get('password') or None
             course = form.cleaned_data.get('course')
-            session = form.cleaned_data.get('session')
+            academic_period = form.cleaned_data.get('academic_period')
             passport = request.FILES.get('profile_pic') or None
             try:
                 user = CustomUser.objects.get(id=student.admin.id)
@@ -982,7 +1450,7 @@ def edit_student(request, student_id):
                 user.address = address
                 user.save()
                 student.course = course
-                student.session = session
+                student.academic_period = academic_period
                 student.save()
                 messages.success(request, "Successfully Updated")
                 return redirect(reverse('edit_student', args=[student_id]))

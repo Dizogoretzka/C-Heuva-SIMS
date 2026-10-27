@@ -123,12 +123,47 @@ class Course(models.Model):
         return self.name
 
 
-class Session(models.Model):
-    start_year = models.DateField()
-    end_year = models.DateField()
+class AcademicPeriod(models.Model):
+    start_year = models.DateField(null=True, blank=True)
+    end_year = models.DateField(null=True, blank=True)
+    year = models.PositiveSmallIntegerField(null=True, blank=True)
+    term = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        choices=((1, 'Term 1'), (2, 'Term 2'), (3, 'Term 3')),
+    )
+    is_current = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['year', 'term'],
+                condition=Q(year__isnull=False, term__isnull=False),
+                name='unique_academic_period_year_term',
+            ),
+            models.UniqueConstraint(
+                fields=['is_current'],
+                condition=Q(is_current=True),
+                name='only_one_current_academic_period',
+            ),
+        ]
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if (self.year is None) != (self.term is None):
+            raise ValidationError(
+                'Choose both a year and a term, or leave both empty for a '
+                'legacy academic period.')
+        if self.term is not None and self.term not in (1, 2, 3):
+            raise ValidationError({'term': 'Choose term 1, 2, or 3.'})
 
     def __str__(self):
-        return "From " + str(self.start_year) + " to " + str(self.end_year)
+        if self.year and self.term:
+            return f'Term {self.term} {self.year}'
+        if self.start_year and self.end_year:
+            return f'From {self.start_year} to {self.end_year}'
+        return f'Academic period {self.pk}'
 
 
 def grade_ordered_courses():
@@ -161,8 +196,8 @@ class Student(models.Model):
     )
     course = models.ForeignKey(
         Course, on_delete=models.SET_NULL, null=True, blank=True)
-    session = models.ForeignKey(
-        Session, on_delete=models.SET_NULL, null=True, blank=True)
+    academic_period = models.ForeignKey(
+        AcademicPeriod, on_delete=models.SET_NULL, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
@@ -223,6 +258,8 @@ class ActivityLog(models.Model):
         ('sign_in', 'Sign in'),
         ('sign_out', 'Sign out'),
         ('failed_sign_in', 'Failed sign in'),
+        ('export', 'Export'),
+        ('import', 'Import'),
     )
 
     actor = models.ForeignKey(
@@ -267,7 +304,7 @@ class GradeBand(models.Model):
     symbol = models.CharField(max_length=10)
     minimum_score = models.FloatField()
     maximum_score = models.FloatField()
-    description = models.CharField(max_length=120)
+    description = models.CharField(max_length=120, blank=True, default='')
     remark = models.TextField(blank=True)
 
     class Meta:
@@ -364,7 +401,8 @@ class StudentResult(models.Model):
 class Attendance(models.Model):
     course = models.ForeignKey(Course, on_delete=models.CASCADE)
     subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
-    session = models.ForeignKey(Session, on_delete=models.CASCADE)
+    academic_period = models.ForeignKey(
+        AcademicPeriod, on_delete=models.CASCADE)
     created_by = models.ForeignKey(
         Teacher,
         on_delete=models.SET_NULL,
@@ -379,8 +417,8 @@ class Attendance(models.Model):
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=['course', 'subject', 'session', 'date'],
-                name='unique_course_subject_session_attendance_date',
+                fields=['course', 'subject', 'academic_period', 'date'],
+                name='unique_course_subject_academic_period_attendance_date',
             ),
         ]
         ordering = ['-date', 'course__name', 'subject__name']

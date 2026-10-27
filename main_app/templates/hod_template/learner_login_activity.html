@@ -33,6 +33,12 @@
                 <div class="card-footer">
                     <button type="submit" class="btn btn-primary">Apply filters</button>
                     <a href="{% url 'learner_login_activity' %}" class="btn btn-default">Clear</a>
+                    <a class="btn btn-outline-primary"
+                       href="?{% if query_params %}{{ query_params }}&amp;{% endif %}export=pdf"
+                       data-export-trigger>Download PDF</a>
+                    <a class="btn btn-outline-success"
+                       href="?{% if query_params %}{{ query_params }}&amp;{% endif %}export=csv"
+                       data-export-trigger>Download CSV</a>
                 </div>
             </form>
         </div>

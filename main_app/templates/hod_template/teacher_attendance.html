@@ -23,7 +23,7 @@
             <div class="card-header">
                 <h3 class="card-title">
                     {{ selection_details.course }} — {{ selection_details.subject }} —
-                    {{ selection_details.session }} — {{ selection_details.date }}
+                    {{ selection_details.academic_period }} — {{ selection_details.date }}
                 </h3>
             </div>
             {% if form.non_field_errors %}<div class="card-body text-danger">{{ form.non_field_errors }}</div>{% endif %}
@@ -59,7 +59,7 @@
                 </div>
             </form>
             {% else %}
-            <div class="card-body">There are no learners assigned to this course/grade and session/term.</div>
+            <div class="card-body">There are no learners assigned to this course/grade and academic period.</div>
             {% endif %}
         </div>
         {% endif %}

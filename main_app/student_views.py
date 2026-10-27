@@ -23,10 +23,10 @@ def student_home(request):
         Q(teacher__isnull=True) | Q(teacher=student.teacher)
     )
     report_card_available = bool(
-        student.session
+        student.academic_period
         and StudentResult.objects.filter(
             student=student,
-            student__session=student.session,
+            student__academic_period=student.academic_period,
         ).exists()
     )
     context = {
@@ -171,7 +171,7 @@ def student_view_result(request):
             if isinstance(result.grade_band, GradeBand)
             else result.grade_band
         )
-    has_report_card = bool(student.session and results)
+    has_report_card = bool(student.academic_period and results)
     context = {
         'results': results,
         'student': student,
@@ -183,15 +183,24 @@ def student_view_result(request):
 
 def student_report_card(request):
     student = get_object_or_404(Student, admin=request.user)
-    if not student.session:
-        messages.warning(request, 'No session / term is assigned to your profile.')
+    if not student.academic_period:
+        messages.warning(request, 'No academic period is assigned to your profile.')
         return redirect(reverse('student_view_result'))
     from .hod_views import _report_card_pdf
 
-    response = _report_card_pdf(request.user, student, student.session)
+    export_format = request.GET.get('export', 'pdf')
+    if export_format not in ('pdf', 'csv'):
+        return HttpResponse('Unsupported export format.', status=400)
+    response = _report_card_pdf(
+        request,
+        request.user,
+        student,
+        student.academic_period,
+        export_format=export_format,
+    )
     if response is None:
         messages.warning(
-            request, 'There are no results for your assigned session / term.')
+            request, 'There are no results for your assigned academic period.')
         return redirect(reverse('student_view_result'))
     return response
 
@@ -202,7 +211,7 @@ def student_attendance(request):
         student=student).select_related(
             'attendance__course',
             'attendance__subject',
-            'attendance__session',
+            'attendance__academic_period',
         ).order_by('-attendance__date')
     total = records.count()
     present = records.filter(status=True).count()

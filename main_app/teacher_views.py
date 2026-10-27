@@ -73,18 +73,18 @@ def teacher_attendance(request):
         selection_loaded = True
         course = selection_form.cleaned_data['course']
         subject = selection_form.cleaned_data['subject']
-        session = selection_form.cleaned_data['session']
+        academic_period = selection_form.cleaned_data['academic_period']
         date = selection_form.cleaned_data['date']
         selection_details = {
             'course': course,
             'subject': subject,
-            'session': session,
+            'academic_period': academic_period,
             'date': date,
         }
         attendance = Attendance.objects.filter(
             course=course,
             subject=subject,
-            session=session,
+            academic_period=academic_period,
             date=date,
         ).filter(
             Q(subject__teacher__teacher=request.user)
@@ -92,7 +92,7 @@ def teacher_attendance(request):
         ).first()
         roster = list(visible_students(request.user).filter(
             course=course,
-            session=session,
+            academic_period=academic_period,
         ).select_related('admin').order_by(
             'admin__last_name', 'admin__first_name'))
         if attendance:
@@ -121,7 +121,7 @@ def teacher_attendance(request):
                     attendance, _ = Attendance.objects.get_or_create(
                         course=course,
                         subject=subject,
-                        session=session,
+                        academic_period=academic_period,
                         date=date,
                         defaults={
                             'created_by_id': request.user.teacher.pk,
@@ -144,7 +144,7 @@ def teacher_attendance(request):
                 messages.success(request, 'Attendance saved successfully.')
                 return redirect(
                     f'{reverse("teacher_attendance")}?course={course.pk}'
-                    f'&subject={subject.pk}&session={session.pk}&date={date}'
+                    f'&subject={subject.pk}&academic_period={academic_period.pk}&date={date}'
                 )
 
             statuses = submitted_values
