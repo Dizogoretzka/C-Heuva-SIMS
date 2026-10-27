@@ -645,10 +645,24 @@ class RegistrationForm(forms.Form):
         choices=CustomUser.GENDER,
         widget=forms.RadioSelect,
     )
-    password = forms.CharField(widget=forms.PasswordInput)
+    password = forms.CharField(
+        min_length=8,
+        error_messages={
+            'min_length': 'Password must be at least 8 characters long.',
+        },
+        help_text='At least 8 characters. Any characters are allowed.',
+        widget=forms.PasswordInput(attrs={
+            'minlength': '8',
+            'autocomplete': 'new-password',
+            'aria-describedby': 'password-length-feedback',
+        }),
+    )
     confirm_password = forms.CharField(
         label='Confirm password',
-        widget=forms.PasswordInput,
+        widget=forms.PasswordInput(attrs={
+            'autocomplete': 'new-password',
+            'aria-describedby': 'password-match-feedback',
+        }),
     )
     profile_pic = forms.ImageField(
         required=False,
@@ -688,16 +702,6 @@ class RegistrationForm(forms.Form):
         confirm_password = cleaned_data.get('confirm_password')
         if password and confirm_password and password != confirm_password:
             self.add_error('confirm_password', 'Passwords do not match.')
-        if password:
-            user = CustomUser(
-                username=cleaned_data.get('username', ''),
-                first_name=cleaned_data.get('first_name', ''),
-                last_name=cleaned_data.get('last_name', ''),
-            )
-            try:
-                validate_password(password, user=user)
-            except ValidationError as error:
-                self.add_error('password', error)
         return cleaned_data
 
 

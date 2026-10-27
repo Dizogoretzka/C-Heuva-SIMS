@@ -28,6 +28,10 @@
     height: 86px;
 }
 
+.registration-page .auth-crest img {
+    height: 132px;
+}
+
 .brand-link {
     display: flex;
     align-items: center;
@@ -73,6 +77,10 @@ body.sidebar-collapse .brand-link .brand-image {
 
     .auth-crest img {
         height: 80px;
+    }
+
+    .registration-page .auth-crest img {
+        height: 112px;
     }
 
     .brand-link .brand-image {

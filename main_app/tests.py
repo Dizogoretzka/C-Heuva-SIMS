@@ -2273,7 +2273,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         self.assertEqual(CustomUser.objects.filter(
             username__iexact='duplicate-user').count(), 1)
 
-    def test_password_confirmation_and_password_validators(self):
+    def test_password_confirmation_and_minimum_length_validation(self):
         data = self._learner_registration_data(
             confirm_password='A-different-password-289!')
         response = self.client.post(
@@ -2282,15 +2282,43 @@ class RegistrationAndRestrictedProfileTests(TestCase):
 
         data = self._learner_registration_data(
             username='weak-password',
-            password='password',
-            confirm_password='password',
+            password='short',
+            confirm_password='short',
         )
         response = self.client.post(
             reverse('register_learner'), data)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'password')
+        self.assertContains(
+            response, 'Password must be at least 8 characters long.')
         self.assertFalse(CustomUser.objects.filter(
             username='weak-password').exists())
+
+    def test_eight_character_password_accepts_any_character_combination(self):
+        data = self._learner_registration_data(
+            username='numeric-password',
+            password='12345678',
+            confirm_password='12345678',
+        )
+        response = self.client.post(
+            reverse('register_learner'), data)
+
+        self.assertRedirects(
+            response,
+            reverse('role_login', args=['learner']),
+        )
+        learner = CustomUser.objects.get(username='numeric-password')
+        self.assertTrue(learner.check_password('12345678'))
+
+    def test_registration_page_shows_prominent_crest_and_live_password_feedback(self):
+        response = self.client.get(reverse('register_learner'))
+
+        self.assertContains(response, 'C. Heuva school crest')
+        self.assertContains(
+            response, 'main_app/js/registration-validation.js')
+        self.assertContains(response, 'password-length-feedback')
+        self.assertContains(response, 'password-match-feedback')
+        self.assertContains(
+            response, 'At least 8 characters. Any characters are allowed.')
 
     def test_learner_registration_does_not_show_or_require_a_grade(self):
         Course.objects.create(name='Grade 9')

@@ -11,7 +11,7 @@
     <link rel="stylesheet" href="{% static 'dist/css/adminlte.min.css' %}">
     <link rel="stylesheet" href="{% static 'main_app/css/branding.css' %}">
 </head>
-<body class="hold-transition login-page">
+<body class="hold-transition login-page registration-page">
     {% include "main_app/page_loader.html" %}
     <div class="login-box" style="width: 480px;">
         <div class="login-logo">
@@ -41,6 +41,11 @@
                         {% else %}
                             {{ field }}
                         {% endif %}
+                        {% if field.name == 'password' %}
+                        <small id="password-length-feedback" class="form-text" aria-live="polite"></small>
+                        {% elif field.name == 'confirm_password' %}
+                        <small id="password-match-feedback" class="form-text" aria-live="polite"></small>
+                        {% endif %}
                         {% if field.help_text %}
                         <small class="form-text text-muted">{{ field.help_text }}</small>
                         {% endif %}
@@ -62,5 +67,6 @@
             </div>
         </div>
     </div>
+    <script src="{% static 'main_app/js/registration-validation.js' %}"></script>
 </body>
 </html>
