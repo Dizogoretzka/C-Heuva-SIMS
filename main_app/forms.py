@@ -646,6 +646,7 @@ class RegistrationForm(forms.Form):
         widget=forms.RadioSelect,
     )
     password = forms.CharField(
+        strip=False,
         min_length=8,
         error_messages={
             'min_length': 'Password must be at least 8 characters long.',
@@ -659,6 +660,7 @@ class RegistrationForm(forms.Form):
     )
     confirm_password = forms.CharField(
         label='Confirm password',
+        strip=False,
         widget=forms.PasswordInput(attrs={
             'autocomplete': 'new-password',
             'aria-describedby': 'password-match-feedback',

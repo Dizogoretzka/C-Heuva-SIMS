@@ -2309,6 +2309,23 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         learner = CustomUser.objects.get(username='numeric-password')
         self.assertTrue(learner.check_password('12345678'))
 
+    def test_registration_preserves_spaces_in_passwords(self):
+        password = '  12345 '
+        data = self._learner_registration_data(
+            username='spaced-password',
+            password=password,
+            confirm_password=password,
+        )
+        response = self.client.post(
+            reverse('register_learner'), data)
+
+        self.assertRedirects(
+            response,
+            reverse('role_login', args=['learner']),
+        )
+        learner = CustomUser.objects.get(username='spaced-password')
+        self.assertTrue(learner.check_password(password))
+
     def test_registration_page_shows_prominent_crest_and_live_password_feedback(self):
         response = self.client.get(reverse('register_learner'))
 
