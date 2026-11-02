@@ -36,21 +36,34 @@
            <tr>
                <th>ID</th>
                <th>Subject</th>
-               <th>Test</th>
+               <th>Academic Period</th>
+               <th>Tests</th>
                <th>Exam</th>
-               <th>Total / Grade</th>
+               <th>Final Mark / Grade</th>
         </tr>
         {% for result in results %}
         <tr data-search-item>
             <td>{{forloop.counter}}</td>
             <td>{{ result.subject }}</td>
-            <td>{{ result.test }}</td>
+            <td>{{ result.academic_period|default:"Not assigned" }}</td>
+            <td>
+                {% for test_name, test_score in result.test_assessment_values %}
+                <div>{{ test_name }}: {{ test_score }}</div>
+                {% endfor %}
+            </td>
             <td>{{ result.exam }}</td>
-            <td>{{ result.total_score }} ({{ result.grade_symbol }})</td>
+            <td>
+                {% if result.assessment_weights %}
+                {{ result.total_score|default:"Not graded" }}
+                ({{ result.grade_symbol }})
+                {% else %}
+                Weights not configured
+                {% endif %}
+            </td>
             </tr>
         {% empty %}
         <tr data-search-item>
-            <td colspan="5" class="text-center text-muted">
+            <td colspan="6" class="text-center text-muted">
                 No results have been recorded for your account yet.
             </td>
         </tr>

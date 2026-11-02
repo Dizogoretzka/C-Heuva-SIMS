@@ -1,0 +1,139 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-lg-8">
+                <div class="card card-primary">
+                    <div class="card-header">
+                        <h3 class="card-title">Set assessment weights</h3>
+                    </div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <div class="card-body">
+                            <p>
+                                Configure the tests used for this subject and
+                                academic period. Add a test whenever needed;
+                                all test weights and the exam weight must total
+                                exactly 100% before results can be entered or
+                                calculated.
+                            </p>
+                            {% if form.non_field_errors %}
+                            <div class="alert alert-danger">
+                                {{ form.non_field_errors }}
+                            </div>
+                            {% endif %}
+                            {% for field in form %}
+                            {% if field.name == 'subject' or field.name == 'academic_period' %}
+                            <div class="form-group">
+                                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                                {{ field }}
+                                {% if field.name|slice:"-6:" == "_weight" %}
+                                <small class="form-text text-muted">
+                                    Enter a percentage between 0 and 100.
+                                </small>
+                                {% endif %}
+                                {% for error in field.errors %}
+                                <div class="text-danger">{{ error }}</div>
+                                {% endfor %}
+                            </div>
+                            {% endif %}
+                            {% endfor %}
+                            {{ form.test_count }}
+                            <div id="assessment-test-weights">
+                                {% for field in form.assessment_test_fields %}
+                                <div class="form-group" data-test-weight-row>
+                                    <label for="{{ field.id_for_label }}">
+                                        {{ field.label }}
+                                        {% if forloop.first %}
+                                        <button class="btn btn-sm btn-outline-primary ml-2"
+                                                type="button" id="add-test-weight">
+                                            <i class="fas fa-plus mr-1"></i>Add another test
+                                        </button>
+                                        {% endif %}
+                                    </label>
+                                    {{ field }}
+                                    <small class="form-text text-muted">
+                                        Enter a percentage between 0 and 100.
+                                    </small>
+                                    {% for error in field.errors %}
+                                    <div class="text-danger">{{ error }}</div>
+                                    {% endfor %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                            <div class="form-group">
+                                <label for="{{ form.exam_weight.id_for_label }}">
+                                    {{ form.exam_weight.label }}
+                                </label>
+                                {{ form.exam_weight }}
+                                <small class="form-text text-muted">
+                                    Enter a percentage between 0 and 100.
+                                </small>
+                                {% for error in form.exam_weight.errors %}
+                                <div class="text-danger">{{ error }}</div>
+                                {% endfor %}
+                            </div>
+                            {% for error in form.test_count.errors %}
+                            <div class="text-danger">{{ error }}</div>
+                            {% endfor %}
+                        </div>
+                        <div class="card-footer">
+                            <button type="submit" class="btn btn-primary">
+                                Save Weights
+                            </button>
+                            <a class="btn btn-secondary"
+                               href="{% url 'manage_student_results' %}">
+                                Back to Results
+                            </a>
+                        </div>
+                    </form>
+                </div>
+                {% if not form.fields.subject.queryset %}
+                <div class="alert alert-info">
+                    Create or assign a subject before configuring its assessment
+                    weights.
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</section>
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        var addButton = document.getElementById('add-test-weight');
+        var testRows = document.getElementById('assessment-test-weights');
+        var countInput = document.getElementById('id_test_count');
+        if (!addButton || !testRows || !countInput) {
+            return;
+        }
+
+        addButton.addEventListener('click', function () {
+            var nextNumber = Number(countInput.value) + 1;
+            var row = document.createElement('div');
+            var label = document.createElement('label');
+            var input = document.createElement('input');
+            var hint = document.createElement('small');
+            row.className = 'form-group';
+            row.setAttribute('data-test-weight-row', '');
+            label.setAttribute('for', 'id_test_' + nextNumber + '_weight');
+            label.textContent = 'Test ' + nextNumber + ' weight (%)';
+            input.className = 'form-control';
+            input.type = 'number';
+            input.name = 'test_' + nextNumber + '_weight';
+            input.id = 'id_test_' + nextNumber + '_weight';
+            input.min = '0';
+            input.max = '100';
+            input.step = '0.01';
+            input.required = true;
+            hint.className = 'form-text text-muted';
+            hint.textContent = 'Enter a percentage between 0 and 100.';
+            row.append(label, input, hint);
+            testRows.appendChild(row);
+            countInput.value = String(nextNumber);
+            input.focus();
+        });
+    });
+</script>
+{% endblock content %}

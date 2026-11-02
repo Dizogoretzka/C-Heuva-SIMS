@@ -1,3 +1,5 @@
+from decimal import Decimal, InvalidOperation
+
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import UserManager
 from django.contrib.auth.signals import user_logged_in
@@ -388,7 +390,19 @@ class StudentResult(models.Model):
         blank=True,
         related_name='created_results',
     )
-    test = models.FloatField(default=0)
+    academic_period = models.ForeignKey(
+        AcademicPeriod,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='results',
+    )
+    test_1 = models.FloatField(default=0)
+    test_2 = models.FloatField(default=0)
+    test_3 = models.FloatField(default=0)
+    test_4 = models.FloatField(default=0)
+    test_5 = models.FloatField(default=0)
+    test_scores = models.JSONField(default=dict, blank=True)
     exam = models.FloatField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -397,6 +411,75 @@ class StudentResult(models.Model):
         verbose_name = 'learner result'
         verbose_name_plural = 'learner results'
 
+    @property
+    def test(self):
+        return self.test_1
+
+    @test.setter
+    def test(self, value):
+        self.test_1 = value
+
+
+class AssessmentWeight(models.Model):
+    subject = models.ForeignKey(
+        Subject,
+        on_delete=models.CASCADE,
+        related_name='assessment_weights',
+    )
+    academic_period = models.ForeignKey(
+        AcademicPeriod,
+        on_delete=models.CASCADE,
+        related_name='assessment_weights',
+    )
+    test_1_weight = models.DecimalField(max_digits=5, decimal_places=2)
+    test_2_weight = models.DecimalField(max_digits=5, decimal_places=2)
+    test_3_weight = models.DecimalField(max_digits=5, decimal_places=2)
+    test_4_weight = models.DecimalField(max_digits=5, decimal_places=2)
+    test_5_weight = models.DecimalField(max_digits=5, decimal_places=2)
+    test_weights = models.JSONField(default=list, blank=True)
+    exam_weight = models.DecimalField(max_digits=5, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['subject', 'academic_period'],
+                name='unique_subject_period_assessment_weights',
+            ),
+        ]
+        ordering = ['academic_period__year', 'academic_period__term', 'subject__name']
+
+    def __str__(self):
+        return f'{self.subject} - {self.academic_period} assessment weights'
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        test_weights = self.test_weights or [
+            {'name': f'Test {number}',
+             'weight': str(getattr(self, f'test_{number}_weight'))}
+            for number in range(1, 6)
+        ]
+        if not self.test_weights and any(
+            getattr(self, f'test_{number}_weight') is None
+            for number in range(1, 6)
+        ):
+            return
+        try:
+            weights = [Decimal(str(test['weight'])) for test in test_weights]
+            weights.append(Decimal(str(self.exam_weight)))
+        except (KeyError, TypeError, ValueError, InvalidOperation) as error:
+            raise ValidationError(
+                'Each test must have a valid percentage weight.') from error
+        if any(weight is None for weight in weights):
+            return
+        if any(weight < 0 or weight > 100 for weight in weights):
+            raise ValidationError(
+                'Each assessment weight must be between 0 and 100%.')
+        if not test_weights or sum(weights) != 100:
+            raise ValidationError(
+                'Assessment weights must total exactly 100%.')
 
 class Attendance(models.Model):
     course = models.ForeignKey(Course, on_delete=models.CASCADE)

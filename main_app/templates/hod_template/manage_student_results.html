@@ -18,13 +18,24 @@
 {% block content %}
 <section class="content">
     <div class="container-fluid">
-        <div class="card card-primary">
+    <div class="mb-3">
+        <a class="btn btn-outline-primary"
+           href="{% url 'manage_assessment_weights' %}">
+            <i class="fas fa-balance-scale mr-1"></i> Configure Assessment Weights
+        </a>
+    </div>
+    <div class="card card-primary">
             <div class="card-header">
                 <h3 class="card-title">Add Learner Result</h3>
             </div>
             <form method="post">
                 {% csrf_token %}
                 <div class="card-body">
+                    <p class="text-muted">
+                        Enter scores from 0 to {{ score_maximum }}. Each result
+                        needs a valid 100% weight setup for its subject and
+                        academic period.
+                    </p>
                     {% if form.non_field_errors %}
                     <div class="alert alert-danger">{{ form.non_field_errors }}</div>
                     {% endif %}
@@ -57,9 +68,10 @@
                             <th>Assigned teacher</th>
                             <th>Subject</th>
                             <th>Recorded by</th>
-                            <th>Test / CA</th>
+                            <th>Academic Period</th>
+                            <th>Tests</th>
                             <th>Exam</th>
-                            <th>Total / Grade</th>
+                            <th>Final Mark / Grade</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -70,9 +82,21 @@
                                 <td>{% if result.student.teacher %}{{ result.student.teacher }}{% else %}Unassigned{% endif %}</td>
                                 <td>{{ result.subject.name }}</td>
                                 <td>{% if result.created_by %}{{ result.created_by }}{% else %}Administrator / legacy{% endif %}</td>
-                                <td>{{ result.test }}</td>
+                                <td>{{ result.academic_period|default:result.student.academic_period|default:"Not assigned" }}</td>
+                                <td>
+                                    {% for test_name, test_score in result.test_assessment_values %}
+                                    <div>{{ test_name }}: {{ test_score }}</div>
+                                    {% endfor %}
+                                </td>
                                 <td>{{ result.exam }}</td>
-                                <td>{{ result.total_score }} ({{ result.grade_symbol }})</td>
+                                <td>
+                                    {% if result.assessment_weights %}
+                                    {{ result.total_score|default:"Not graded" }}
+                                    ({{ result.grade_symbol }})
+                                    {% else %}
+                                    Weights not configured
+                                    {% endif %}
+                                </td>
                                 <td class="text-nowrap">
                                     <a class="btn btn-sm btn-primary"
                                        href="{% url 'edit_student_result' result.id %}">Edit</a>
@@ -87,7 +111,7 @@
                             </tr>
                         {% empty %}
                             <tr data-search-item>
-                                <td colspan="8" class="text-center text-muted">
+                                <td colspan="9" class="text-center text-muted">
                                     No learner results have been recorded yet.
                                 </td>
                             </tr>
@@ -101,4 +125,26 @@
         </div>
     </div>
 </section>
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        var subject = document.getElementById('id_subject');
+        var period = document.getElementById('id_academic_period');
+        if (!subject || !period) {
+            return;
+        }
+
+        function reloadAssessmentFields() {
+            if (!subject.value || !period.value) {
+                return;
+            }
+            var url = new URL(window.location.href);
+            url.searchParams.set('subject', subject.value);
+            url.searchParams.set('academic_period', period.value);
+            window.location.assign(url);
+        }
+
+        subject.addEventListener('change', reloadAssessmentFields);
+        period.addEventListener('change', reloadAssessmentFields);
+    });
+</script>
 {% endblock content %}

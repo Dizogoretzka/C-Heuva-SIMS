@@ -89,6 +89,8 @@ urlpatterns = [
          hod_views.edit_subject, name='edit_subject'),
     path("results/manage/", hod_views.manage_student_results,
          name='manage_student_results'),
+    path("results/assessment-weights/", hod_views.manage_assessment_weights,
+         name='manage_assessment_weights'),
     path("results/edit/<int:result_id>/", hod_views.edit_student_result,
          name='edit_student_result'),
     path("results/delete/<int:result_id>/", hod_views.delete_student_result,

@@ -11,6 +11,11 @@ from django.forms.formsets import BaseFormSet
 from django.forms import formset_factory
 
 from .credentials import verify_pin
+from .grading import (
+    get_assessment_weights,
+    get_test_scores,
+    get_test_weights,
+)
 from .models import *
 from .models import grade_ordered_courses
 
@@ -119,16 +124,81 @@ class SubjectForm(FormSettings):
 
 
 class StudentResultForm(FormSettings):
-    test = forms.FloatField(min_value=0)
-    exam = forms.FloatField(min_value=0, label='Exam score')
-
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
+        maximum = settings.SIMS_MAX_TOTAL_SCORE
+        self.fields['academic_period'].queryset = AcademicPeriod.objects.order_by(
+            '-year', 'term', '-start_year')
+        if not self.is_bound and not self.instance.pk:
+            self.fields['academic_period'].initial = AcademicPeriod.objects.filter(
+                is_current=True).first()
         if user and user.user_type == '3':
             self.fields['student'].queryset = Student.objects.filter(
                 teacher__teacher=user).select_related('admin')
             self.fields['subject'].queryset = Subject.objects.filter(
                 Q(teacher__teacher=user) | Q(teacher__isnull=True))
+        subject = self._selected_model('subject', Subject)
+        academic_period = self._selected_model(
+            'academic_period', AcademicPeriod)
+        weights = get_assessment_weights(subject, academic_period)
+        configured_tests = get_test_weights(weights) if weights else []
+        test_scores = get_test_scores(self.instance, weights)
+        self.assessment_test_fields = []
+        test_names = (
+            [name for name, _ in configured_tests]
+            or ['Test 1']
+        )
+        for number, name in enumerate(test_names, start=1):
+            field_name = f'test_{number}'
+            self.fields[field_name] = forms.FloatField(
+                min_value=0,
+                max_value=maximum,
+                label=f'{name} score',
+                initial=(
+                    test_scores[number - 1]
+                    if self.instance.pk and number <= len(test_scores)
+                    else None
+                ),
+                validators=[MaxValueValidator(maximum)],
+                widget=forms.NumberInput(attrs={
+                    'class': 'form-control',
+                    'max': maximum,
+                    'step': 'any',
+                }),
+            )
+            self.assessment_test_fields.append(self[field_name])
+        ordered_fields = {
+            name: self.fields[name]
+            for name in ('student', 'subject', 'academic_period')
+        }
+        ordered_fields.update({
+            f'test_{number}': self.fields[f'test_{number}']
+            for number in range(1, len(test_names) + 1)
+        })
+        ordered_fields['exam'] = self.fields['exam']
+        self.fields = ordered_fields
+        self.fields['exam'].max_value = maximum
+        self.fields['exam'].validators.append(MaxValueValidator(maximum))
+        self.fields['exam'].widget.attrs.update({
+            'max': maximum,
+            'step': 'any',
+        })
+
+    def _selected_model(self, field_name, model):
+        if self.is_bound:
+            value = self.data.get(self.add_prefix(field_name))
+        elif self.instance.pk:
+            value = getattr(self.instance, f'{field_name}_id', None)
+        else:
+            value = self.initial.get(field_name)
+            if hasattr(value, 'pk'):
+                value = value.pk
+        if not value:
+            return None
+        try:
+            return model.objects.filter(pk=int(value)).first()
+        except (TypeError, ValueError):
+            return None
 
     def clean(self):
         cleaned_data = super().clean()
@@ -142,28 +212,221 @@ class StudentResultForm(FormSettings):
                 'subject',
                 "Choose a subject assigned to the learner's grade or school-wide.",
             )
-        test = cleaned_data.get('test')
-        exam = cleaned_data.get('exam')
-        if (
-            test is not None
-            and exam is not None
-            and test + exam > settings.SIMS_MAX_TOTAL_SCORE
+        academic_period = cleaned_data.get('academic_period')
+        if student and subject and academic_period and not get_assessment_weights(
+            subject, academic_period
         ):
             self.add_error(
-                None,
-                'The test and examination scores cannot total more than '
-                f'{settings.SIMS_MAX_TOTAL_SCORE}.',
+                'subject',
+                'Configure assessment weights totaling 100% for this '
+                'subject and academic period before entering results.',
             )
         return cleaned_data
 
+    def save(self, commit=True):
+        result = super().save(commit=False)
+        weights = get_assessment_weights(
+            result.subject,
+            result.academic_period or result.student.academic_period,
+        )
+        configured_tests = get_test_weights(weights) if weights else []
+        test_names = (
+            [name for name, _ in configured_tests]
+            or [f'Test {number}' for number in range(
+                1, len(self.assessment_test_fields) + 1)]
+        )
+        result.test_scores = {
+            name: self.cleaned_data[f'test_{number}']
+            for number, name in enumerate(test_names, start=1)
+        }
+        for number in range(1, 6):
+            setattr(
+                result,
+                f'test_{number}',
+                result.test_scores.get(f'Test {number}', 0),
+            )
+        if commit:
+            result.save()
+            self.save_m2m()
+        return result
+
     class Meta:
         model = StudentResult
-        fields = ['student', 'subject', 'test', 'exam']
+        fields = [
+            'student',
+            'subject',
+            'academic_period',
+            'exam',
+        ]
         labels = {
             'student': 'Learner',
-            'test': 'Test / CA score',
+            'academic_period': 'Academic Period',
             'exam': 'Exam score',
         }
+
+
+class AssessmentWeightForm(FormSettings):
+    test_count = forms.IntegerField(
+        required=False,
+        min_value=1,
+        widget=forms.HiddenInput(),
+    )
+
+    class Meta:
+        model = AssessmentWeight
+        fields = [
+            'subject',
+            'academic_period',
+            'exam_weight',
+        ]
+        labels = {
+            'subject': 'Subject',
+            'academic_period': 'Academic Period',
+            'exam_weight': 'Exam weight (%)',
+        }
+        widgets = {
+            'exam_weight': forms.NumberInput(
+                attrs={'min': 0, 'max': 100, 'step': '0.01'})
+        }
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['subject'].queryset = Subject.objects.order_by('name')
+        self.fields['academic_period'].queryset = AcademicPeriod.objects.order_by(
+            '-year', 'term', '-start_year')
+        if user and user.user_type == '3':
+            self.fields['subject'].queryset = self.fields[
+                'subject'
+            ].queryset.filter(
+                Q(teacher__teacher=user) | Q(teacher__isnull=True)
+            )
+        existing_tests = (
+            get_test_weights(self.instance)
+            if self.instance and self.instance.pk
+            else []
+        )
+        if self.is_bound:
+            indices = [
+                int(match.group(1))
+                for key in self.data
+                if (match := re.fullmatch(
+                    re.escape(self.add_prefix('test_'))
+                    + r'(\d+)_weight', key))
+            ]
+            inferred_count = max(indices, default=1)
+            count_value = inferred_count
+            submitted_count = self.data.get(
+                self.add_prefix('test_count'))
+            self.test_count_mismatch = False
+            if submitted_count:
+                try:
+                    self.test_count_mismatch = (
+                        int(submitted_count) != inferred_count)
+                except ValueError:
+                    self.test_count_mismatch = True
+        else:
+            count_value = len(existing_tests) or 1
+            self.test_count_mismatch = False
+        try:
+            self.test_count = max(1, int(count_value))
+        except (TypeError, ValueError):
+            self.test_count = 1
+        self.fields['test_count'].initial = self.test_count
+        for number in range(1, self.test_count + 1):
+            field_name = f'test_{number}_weight'
+            initial = (
+                existing_tests[number - 1][1]
+                if number <= len(existing_tests)
+                else None
+            )
+            self.fields[field_name] = forms.DecimalField(
+                min_value=0,
+                max_value=100,
+                label=f'Test {number} weight (%)',
+                initial=initial,
+                widget=forms.NumberInput(attrs={
+                    'min': 0, 'max': 100, 'step': '0.01',
+                    'class': 'form-control',
+                }),
+            )
+        ordered_fields = {
+            name: self.fields[name]
+            for name in ('subject', 'academic_period', 'test_count')
+        }
+        ordered_fields.update({
+            f'test_{number}_weight': self.fields[f'test_{number}_weight']
+            for number in range(1, self.test_count + 1)
+        })
+        ordered_fields['exam_weight'] = self.fields['exam_weight']
+        self.fields = ordered_fields
+        self.assessment_test_fields = [
+            self[f'test_{number}_weight']
+            for number in range(1, self.test_count + 1)
+        ]
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if self.test_count_mismatch:
+            self.add_error(
+                'test_count',
+                'The assessment rows changed unexpectedly. Please review them.',
+            )
+        weights = [
+            cleaned_data.get(f'test_{number}_weight')
+            for number in range(1, self.test_count + 1)
+        ]
+        weights.append(cleaned_data.get('exam_weight'))
+        if all(weight is not None for weight in weights):
+            total = sum(weights)
+            if total != 100:
+                raise ValidationError(
+                    f'Assessment weights must total exactly 100%. '
+                    f'The current total is {total}%.')
+        return cleaned_data
+
+    def _post_clean(self):
+        if all(
+            self.cleaned_data.get(f'test_{number}_weight') is not None
+            for number in range(1, self.test_count + 1)
+        ):
+            self.instance.test_weights = [
+                {
+                    'name': f'Test {number}',
+                    'weight': str(
+                        self.cleaned_data[f'test_{number}_weight']),
+                }
+                for number in range(1, self.test_count + 1)
+            ]
+            for number in range(1, 6):
+                self.instance.__dict__[f'test_{number}_weight'] = (
+                    self.cleaned_data[f'test_{number}_weight']
+                    if number <= self.test_count
+                    else 0
+                )
+        super()._post_clean()
+
+    def save(self, commit=True):
+        instance = super().save(commit=False)
+        instance.test_weights = [
+            {
+                'name': f'Test {number}',
+                'weight': str(self.cleaned_data[f'test_{number}_weight']),
+            }
+            for number in range(1, self.test_count + 1)
+        ]
+        legacy_count = min(self.test_count, 5)
+        for number in range(1, 6):
+            setattr(
+                instance,
+                f'test_{number}_weight',
+                self.cleaned_data[f'test_{number}_weight']
+                if number <= legacy_count
+                else 0,
+            )
+        if commit:
+            instance.save()
+            self.save_m2m()
+        return instance
 
 
 class ReportGenerationForm(forms.Form):

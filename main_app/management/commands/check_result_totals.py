@@ -5,7 +5,7 @@ from main_app.models import StudentResult
 
 
 class Command(BaseCommand):
-    help = 'List existing results outside the configured score limits.'
+    help = 'List existing assessment scores outside configured limits.'
 
     def handle(self, *args, **options):
         maximum = settings.SIMS_MAX_TOTAL_SCORE
@@ -14,12 +14,22 @@ class Command(BaseCommand):
         invalid_count = 0
 
         for result in results.iterator():
-            total = result.test + result.exam
+            scores = result.test_scores or {
+                f'Test {number}': getattr(result, f'test_{number}')
+                for number in range(1, 6)
+            }
+            scores['Exam'] = result.exam
             problems = []
-            if result.test < 0 or result.exam < 0 or total < 0:
+            if any(score < 0 for score in scores.values()):
                 problems.append('below zero')
-            if total > maximum:
-                problems.append(f'above maximum {maximum}')
+            out_of_range = [
+                f'{name}={score:g}'
+                for name, score in scores.items()
+                if score > maximum
+            ]
+            if out_of_range:
+                problems.append(
+                    f'above maximum {maximum}: {", ".join(out_of_range)}')
             if not problems:
                 continue
 
@@ -30,8 +40,8 @@ class Command(BaseCommand):
             )
             self.stdout.write(
                 f'Result {result.pk}: learner={learner}; '
-                f'subject={result.subject.name}; test={result.test:g}; '
-                f'exam={result.exam:g}; total={total:g}; '
+                f'subject={result.subject.name}; '
+                f'assessment scores={scores}; '
                 f'issue={", ".join(problems)}'
             )
 
@@ -45,6 +55,6 @@ class Command(BaseCommand):
         else:
             self.stdout.write(
                 self.style.SUCCESS(
-                    f'All existing result totals are within 0..{maximum}.'
+                    f'All existing assessment scores are within 0..{maximum}.'
                 )
             )

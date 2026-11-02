@@ -12,6 +12,12 @@
                     <form method="post">
                         {% csrf_token %}
                         <div class="card-body">
+                            <p class="text-muted">
+                                Enter each assessment score from 0 to
+                                {{ score_maximum }}. Scores are calculated with
+                                the teacher-configured weights for the selected
+                                subject and academic period.
+                            </p>
                             {% if form.non_field_errors %}
                             <div class="alert alert-danger">{{ form.non_field_errors }}</div>
                             {% endif %}

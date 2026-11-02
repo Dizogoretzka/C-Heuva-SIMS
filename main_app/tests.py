@@ -22,6 +22,7 @@ from PIL import Image
 from .models import (
     Admin,
     ActivityLog,
+    AssessmentWeight,
     Attendance,
     AttendanceReport,
     Course,
@@ -358,8 +359,6 @@ class InterfaceSelectionTests(TestCase):
         )
         academic_period = AcademicPeriod.objects.create(
             start_year='2026-01-01', end_year='2026-12-31')
-        learner.student.academic_period = academic_period
-        learner.student.save()
         subject = Subject.objects.create(name='Mathematics')
         StudentResult.objects.create(
             student=learner.student, subject=subject, test=20, exam=70)
@@ -1012,6 +1011,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         learner.student.course = self.course
         learner.student.academic_period = self.academic_period
         learner.student.teacher = self.teacher.teacher
+        learner.student.academic_period = academic_period
         learner.student.save()
         return learner
 
@@ -1578,14 +1578,32 @@ class TeacherRoleAndAttendanceTests(TestCase):
             last_name='Learner',
         )
         learner.student.teacher = teacher.teacher
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        learner.student.academic_period = academic_period
         learner.student.save()
         subject = Subject.objects.create(name='Mathematics')
+        AssessmentWeight.objects.create(
+            subject=subject,
+            academic_period=academic_period,
+            test_1_weight=50,
+            test_2_weight=0,
+            test_3_weight=0,
+            test_4_weight=0,
+            test_5_weight=0,
+            exam_weight=50,
+        )
         self.client.force_login(teacher)
 
         response = self.client.post(reverse('manage_student_results'), {
             'student': learner.student.pk,
             'subject': subject.pk,
-            'test': '18',
+            'academic_period': academic_period.pk,
+            'test_1': '18',
+            'test_2': '0',
+            'test_3': '0',
+            'test_4': '0',
+            'test_5': '0',
             'exam': '72',
         })
 
@@ -1605,7 +1623,12 @@ class TeacherRoleAndAttendanceTests(TestCase):
             {
                 'student': learner.student.pk,
                 'subject': subject.pk,
-                'test': '20',
+                'academic_period': academic_period.pk,
+                'test_1': '20',
+                'test_2': '0',
+                'test_3': '0',
+                'test_4': '0',
+                'test_5': '0',
                 'exam': '75',
             },
         )
@@ -1622,7 +1645,7 @@ class TeacherRoleAndAttendanceTests(TestCase):
         self.assertContains(response, 'Mathematics')
         self.assertContains(response, '20.0')
         self.assertContains(response, '75.0')
-        self.assertContains(response, '95.0')
+        self.assertContains(response, '47.5')
 
     def test_learner_cannot_access_admin_result_management(self):
         learner = CustomUser.objects.create_user(
@@ -1772,6 +1795,277 @@ class GradeBandAndReportCardTests(TestCase):
                 data[f'bands-{index}-{name}'] = row.get(name, '')
         return data
 
+    @staticmethod
+    def _create_assessment_weights(subject, academic_period, values=None):
+        values = values or (50, 0, 0, 0, 0, 50)
+        return AssessmentWeight.objects.create(
+            subject=subject,
+            academic_period=academic_period,
+            test_1_weight=values[0],
+            test_2_weight=values[1],
+            test_3_weight=values[2],
+            test_4_weight=values[3],
+            test_5_weight=values[4],
+            exam_weight=values[5],
+        )
+
+    @staticmethod
+    def _result_payload(learner, subject, academic_period, **scores):
+        data = {
+            'student': learner.student.pk,
+            'subject': subject.pk,
+            'academic_period': academic_period.pk,
+            'test_1': '0',
+            'test_2': '0',
+            'test_3': '0',
+            'test_4': '0',
+            'test_5': '0',
+            'exam': '0',
+        }
+        data.update(scores)
+        return data
+
+    def test_assessment_weights_require_exactly_100_percent_and_can_be_changed(self):
+        subject = Subject.objects.create(
+            name='Mathematics', teacher=self.teacher.teacher)
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        url = reverse('manage_assessment_weights')
+        self.assertContains(self.client.get(url), 'Test 1 weight (%)')
+        self.assertContains(self.client.get(url), 'Add another test')
+
+        payload = {
+            'subject': subject.pk,
+            'academic_period': academic_period.pk,
+            'test_1_weight': '20',
+            'test_2_weight': '10',
+            'test_3_weight': '10',
+            'test_4_weight': '10',
+            'test_5_weight': '10',
+            'exam_weight': '39.99',
+        }
+        response = self.client.post(url, payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'must total exactly 100%')
+        self.assertFalse(AssessmentWeight.objects.exists())
+
+        payload['exam_weight'] = '40'
+        response = self.client.post(url, payload)
+        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, url, fetch_redirect_response=False)
+        weights = AssessmentWeight.objects.get(
+            subject=subject, academic_period=academic_period)
+        self.assertEqual(
+            sum((
+                weights.test_1_weight,
+                weights.test_2_weight,
+                weights.test_3_weight,
+                weights.test_4_weight,
+                weights.test_5_weight,
+                weights.exam_weight,
+            )),
+            100,
+        )
+
+        payload.update({
+            'test_1_weight': '10',
+            'test_2_weight': '10',
+            'test_3_weight': '10',
+            'test_4_weight': '10',
+            'test_5_weight': '10',
+            'exam_weight': '50',
+        })
+        response = self.client.post(url, payload)
+        self.assertRedirects(response, url, fetch_redirect_response=False)
+        self.assertEqual(AssessmentWeight.objects.count(), 1)
+        weights.refresh_from_db()
+        self.assertEqual(weights.test_1_weight, 10)
+        self.assertEqual(weights.exam_weight, 50)
+
+    def test_teacher_can_add_custom_number_of_tests_and_calculate_result(self):
+        from .grading import calculate_final_mark
+
+        learner = CustomUser.objects.create_user(
+            username='custom-tests-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        learner.student.teacher = self.teacher.teacher
+        learner.student.save()
+        subject = Subject.objects.create(
+            name='Custom Assessments', teacher=self.teacher.teacher)
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        learner.student.academic_period = academic_period
+        learner.student.save()
+
+        response = self.client.post(reverse('manage_assessment_weights'), {
+            'subject': subject.pk,
+            'academic_period': academic_period.pk,
+            'test_count': '2',
+            'test_1_weight': '30',
+            'test_2_weight': '30',
+            'exam_weight': '40',
+        })
+        self.assertRedirects(
+            response,
+            reverse('manage_assessment_weights'),
+            fetch_redirect_response=False,
+        )
+        weights = AssessmentWeight.objects.get(
+            subject=subject, academic_period=academic_period)
+        self.assertEqual(
+            weights.test_weights,
+            [
+                {'name': 'Test 1', 'weight': '30'},
+                {'name': 'Test 2', 'weight': '30'},
+            ],
+        )
+        response = self.client.get(
+            reverse('manage_student_results'),
+            {
+                'subject': subject.pk,
+                'academic_period': academic_period.pk,
+            },
+        )
+        self.assertContains(response, 'Test 2 score')
+
+        response = self.client.post(reverse('manage_student_results'), {
+            'student': learner.student.pk,
+            'subject': subject.pk,
+            'academic_period': academic_period.pk,
+            'test_1': '80',
+            'test_2': '90',
+            'exam': '100',
+        })
+        self.assertRedirects(
+            response,
+            reverse('manage_student_results'),
+            fetch_redirect_response=False,
+        )
+        result = StudentResult.objects.get(student=learner.student)
+        self.assertEqual(result.test_scores, {'Test 1': 80, 'Test 2': 90})
+        self.assertEqual(calculate_final_mark(result, weights), 91)
+
+        self.client.force_login(learner)
+        learner_results = self.client.get(reverse('student_view_result'))
+        self.assertContains(learner_results, 'Test 2: 90')
+
+        self.client.force_login(self.teacher)
+        report_card = self.client.post(reverse('generate_report_card'), {
+            'student': learner.student.pk,
+            'academic_period': academic_period.pk,
+            'export_format': 'csv',
+        })
+        self.assertEqual(report_card.status_code, 200)
+        self.assertIn(b'Test 2 score / weight', report_card.content)
+        self.assertIn(b'90 / 30%', report_card.content)
+
+    def test_teacher_cannot_set_weights_for_another_teachers_subject(self):
+        other_teacher = CustomUser.objects.create_user(
+            username='weight-owner-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='F',
+        )
+        subject = Subject.objects.create(
+            name='Restricted Subject', teacher=other_teacher.teacher)
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        response = self.client.post(reverse('manage_assessment_weights'), {
+            'subject': subject.pk,
+            'academic_period': academic_period.pk,
+            'test_1_weight': '50',
+            'test_2_weight': '0',
+            'test_3_weight': '0',
+            'test_4_weight': '0',
+            'test_5_weight': '0',
+            'exam_weight': '50',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(AssessmentWeight.objects.exists())
+        self.assertFalse(response.context['form'].is_valid())
+
+    def test_final_mark_uses_all_six_configured_component_weights(self):
+        from .grading import calculate_final_mark
+
+        learner, academic_period, subject, result = (
+            self._make_learner_with_result(
+                'weighted-mark@example.com', 'Grade 7', 'Science'))
+        result.test_1 = 10
+        result.test_2 = 20
+        result.test_3 = 30
+        result.test_4 = 40
+        result.test_5 = 50
+        result.exam = 100
+        result.academic_period = academic_period
+        result.save()
+        weights = AssessmentWeight.objects.get(
+            subject=subject, academic_period=academic_period)
+        weights.test_1_weight = 10
+        weights.test_2_weight = 10
+        weights.test_3_weight = 10
+        weights.test_4_weight = 10
+        weights.test_5_weight = 10
+        weights.exam_weight = 50
+        weights.save()
+
+        self.assertEqual(calculate_final_mark(result, weights), 65)
+
+    def test_results_require_valid_weights_and_store_all_assessments_and_period(self):
+        learner = CustomUser.objects.create_user(
+            username='five-tests-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        learner.student.teacher = self.teacher.teacher
+        learner.student.save()
+        subject = Subject.objects.create(
+            name='English', teacher=self.teacher.teacher)
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        payload = self._result_payload(
+            learner,
+            subject,
+            academic_period,
+            test_1='10',
+            test_2='20',
+            test_3='30',
+            test_4='40',
+            test_5='50',
+            exam='60',
+        )
+
+        response = self.client.post(reverse('manage_student_results'), payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(StudentResult.objects.exists())
+        self.assertContains(response, 'Configure assessment weights')
+
+        self._create_assessment_weights(
+            subject, academic_period, (10, 10, 10, 10, 10, 50))
+        response = self.client.post(reverse('manage_student_results'), payload)
+        self.assertRedirects(
+            response,
+            reverse('manage_student_results'),
+            fetch_redirect_response=False,
+        )
+        result = StudentResult.objects.get()
+        self.assertEqual(
+            (
+                result.test_1,
+                result.test_2,
+                result.test_3,
+                result.test_4,
+                result.test_5,
+                result.exam,
+            ),
+            (10, 20, 30, 40, 50, 60),
+        )
+        self.assertEqual(result.academic_period, academic_period)
+
     def test_reports_page_has_eight_grade_band_rows_and_saves_valid_rows(self):
         GradeBand.objects.create(
             symbol='Old', minimum_score=0, maximum_score=100)
@@ -1895,15 +2189,27 @@ class GradeBandAndReportCardTests(TestCase):
             address='',
         )
         learner.student.teacher = self.teacher.teacher
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        learner.student.academic_period = academic_period
         learner.student.save()
         subject = Subject.objects.create(name='Mathematics')
+        self._create_assessment_weights(subject, academic_period)
         StudentResult.objects.create(
-            student=learner.student, subject=subject, test=20, exam=70)
+            student=learner.student,
+            subject=subject,
+            academic_period=academic_period,
+            test_1=90,
+            exam=90,
+        )
         GradeBand.objects.create(
             symbol='B', minimum_score=70, maximum_score=89)
 
         response = self.client.get(reverse('manage_student_results'))
-        self.assertContains(response, '90.0 (Not graded)')
+        self.assertEqual(len(response.context['results']), 1)
+        self.assertEqual(response.context['results'][0].total_score, 90)
+        self.assertRegex(
+            response.content.decode(), r'90(?:\.0+)?\s*\(Not graded\)')
 
         response = self.client.post(reverse('generate_report'),
             self._grade_band_payload([{
@@ -1919,9 +2225,9 @@ class GradeBandAndReportCardTests(TestCase):
             fetch_redirect_response=False,
         )
         response = self.client.get(reverse('manage_student_results'))
-        self.assertContains(response, '90.0 (A)')
+        self.assertRegex(response.content.decode(), r'90(?:\.0+)?\s*\(A\)')
 
-    def test_result_entry_rejects_scores_outside_configured_total(self):
+    def test_result_entry_rejects_scores_outside_configured_component_limit(self):
         learner = CustomUser.objects.create_user(
             username='score-limit-learner',
             password='valid-password',
@@ -1929,38 +2235,51 @@ class GradeBandAndReportCardTests(TestCase):
             gender='F',
         )
         learner.student.teacher = self.teacher.teacher
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        learner.student.academic_period = academic_period
         learner.student.save()
         subject = Subject.objects.create(name='Mathematics')
+        self._create_assessment_weights(subject, academic_period)
         existing = StudentResult.objects.create(
-            student=learner.student, subject=subject, test=20, exam=30)
+            student=learner.student,
+            subject=subject,
+            academic_period=academic_period,
+            test_1=20,
+            exam=30,
+        )
 
         response = self.client.post(reverse('manage_student_results'), {
-            'student': learner.student.pk,
-            'subject': subject.pk,
-            'test': settings.SIMS_MAX_TOTAL_SCORE,
-            'exam': 1,
+            **self._result_payload(
+                learner,
+                subject,
+                academic_period,
+                test_1=str(settings.SIMS_MAX_TOTAL_SCORE + 1),
+                exam='1',
+            ),
         })
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'cannot total more than')
+        self.assertContains(response, 'Ensure this value is less than or equal to')
         self.assertEqual(StudentResult.objects.count(), 1)
 
         response = self.client.post(
             reverse('edit_student_result', args=[existing.pk]), {
-                'student': learner.student.pk,
-                'subject': subject.pk,
-                'test': settings.SIMS_MAX_TOTAL_SCORE,
-                'exam': 1,
+                **self._result_payload(
+                    learner,
+                    subject,
+                    academic_period,
+                    test_1=str(settings.SIMS_MAX_TOTAL_SCORE + 1),
+                    exam='1',
+                ),
             })
         self.assertEqual(response.status_code, 200)
         existing.refresh_from_db()
         self.assertEqual((existing.test, existing.exam), (20, 30))
 
-        response = self.client.post(reverse('manage_student_results'), {
-            'student': learner.student.pk,
-            'subject': subject.pk,
-            'test': -1,
-            'exam': 0,
-        })
+        response = self.client.post(
+            reverse('manage_student_results'),
+            self._result_payload(
+                learner, subject, academic_period, test_1='-1'))
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context['form'].is_valid())
         self.assertEqual(StudentResult.objects.count(), 1)
@@ -1986,14 +2305,22 @@ class GradeBandAndReportCardTests(TestCase):
             gender='F',
         )
         learner.student.teacher = self.teacher.teacher
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        learner.student.academic_period = academic_period
         learner.student.save()
         subject = Subject.objects.create(name='Science')
-        response = self.client.post(reverse('manage_student_results'), {
-            'student': learner.student.pk,
-            'subject': subject.pk,
-            'test': 30,
-            'exam': 21,
-        })
+        self._create_assessment_weights(subject, academic_period)
+        response = self.client.post(
+            reverse('manage_student_results'),
+            self._result_payload(
+                learner,
+                subject,
+                academic_period,
+                test_1='30',
+                exam='51',
+            ),
+        )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(StudentResult.objects.exists())
 
@@ -2038,8 +2365,18 @@ class GradeBandAndReportCardTests(TestCase):
             address='',
         )
         subject = Subject.objects.create(name='Science')
+        academic_period = AcademicPeriod.objects.create(
+            start_year='2026-01-01', end_year='2026-12-31')
+        learner.student.academic_period = academic_period
+        learner.student.save()
+        self._create_assessment_weights(subject, academic_period)
         StudentResult.objects.create(
-            student=learner.student, subject=subject, test=30, exam=50)
+            student=learner.student,
+            subject=subject,
+            academic_period=academic_period,
+            test_1=60,
+            exam=100,
+        )
         GradeBand.objects.create(
             symbol='B', minimum_score=80, maximum_score=80,
             description='Good')
@@ -2047,7 +2384,9 @@ class GradeBandAndReportCardTests(TestCase):
 
         response = self.client.get(reverse('student_view_result'))
 
-        self.assertContains(response, '80.0 (B)')
+        self.assertEqual(len(response.context['results']), 1)
+        self.assertEqual(response.context['results'][0].total_score, 80)
+        self.assertRegex(response.content.decode(), r'80(?:\.0+)?\s*\(B\)')
 
     def test_removed_grade_band_urls_return_404_and_reports_respect_roles(self):
         for url in (
@@ -2201,8 +2540,14 @@ class GradeBandAndReportCardTests(TestCase):
         learner.student.save()
         subject = Subject.objects.create(
             name=subject_name, course=course, teacher=self.teacher.teacher)
+        self._create_assessment_weights(subject, academic_period)
         result = StudentResult.objects.create(
-            student=learner.student, subject=subject, test=20, exam=70)
+            student=learner.student,
+            subject=subject,
+            academic_period=academic_period,
+            test_1=20,
+            exam=70,
+        )
         return learner, academic_period, subject, result
 
 

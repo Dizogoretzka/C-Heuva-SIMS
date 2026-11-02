@@ -3,14 +3,20 @@ import json
 from django.contrib import messages
 from django.contrib.auth import update_session_auth_hash
 from django.core.files.storage import FileSystemStorage
-from django.db.models import ExpressionWrapper, F, FloatField, Q
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 
 from .forms import *
-from .grading import get_grade_band
+from .grading import (
+    calculate_final_mark,
+    get_assessment_weights,
+    get_grade_band,
+    get_test_scores,
+    get_test_weights,
+)
 from .models import *
 from .views import render_pin_confirmation, update_profile_from_form
 
@@ -26,7 +32,9 @@ def student_home(request):
         student.academic_period
         and StudentResult.objects.filter(
             student=student,
-            student__academic_period=student.academic_period,
+        ).filter(
+            Q(academic_period=student.academic_period)
+            | Q(academic_period__isnull=True)
         ).exists()
     )
     context = {
@@ -159,18 +167,31 @@ def student_view_notification(request):
 
 def student_view_result(request):
     student = get_object_or_404(Student, admin=request.user)
-    results = list(StudentResult.objects.filter(student=student).select_related(
-        'subject').annotate(
-        total_score=ExpressionWrapper(
-            F('test') + F('exam'), output_field=FloatField())))
+    results = list(StudentResult.objects.filter(
+        student=student).select_related(
+            'subject', 'academic_period', 'student__academic_period'))
     grade_bands = list(GradeBand.objects.order_by('minimum_score'))
     for result in results:
+        result.assessment_weights = get_assessment_weights(
+            result.subject,
+            result.academic_period or student.academic_period,
+        )
+        result.total_score = calculate_final_mark(
+            result, result.assessment_weights)
         result.grade_band = get_grade_band(result.total_score, grade_bands)
         result.grade_symbol = (
             result.grade_band.symbol
             if isinstance(result.grade_band, GradeBand)
             else result.grade_band
         )
+        test_weights = get_test_weights(result.assessment_weights) or [
+            (f'Test {number}', None) for number in range(1, 6)
+        ]
+        test_scores = get_test_scores(result, result.assessment_weights)
+        result.test_assessment_values = [
+            (name, score)
+            for (name, _), score in zip(test_weights, test_scores)
+        ]
     has_report_card = bool(student.academic_period and results)
     context = {
         'results': results,

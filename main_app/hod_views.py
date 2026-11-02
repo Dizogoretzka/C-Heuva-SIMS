@@ -25,14 +25,20 @@ from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .forms import *
 from .credentials import issue_pin
-from .grading import get_grade_band
+from .grading import (
+    calculate_final_mark,
+    get_assessment_weights,
+    get_grade_band,
+    get_test_scores,
+    get_test_weights,
+)
 from .learner_imports import (
     LearnerImportError,
     parse_learner_upload,
@@ -138,14 +144,17 @@ def delete_academic_period(request, period_id):
         has_results = Student.objects.filter(
             academic_period=period,
             studentresult__isnull=False,
-        ).exists()
+        ).exists() or StudentResult.objects.filter(
+            academic_period=period).exists()
         has_attendance = Attendance.objects.filter(
             academic_period=period).exists()
-        if has_results or has_attendance:
+        has_weights = AssessmentWeight.objects.filter(
+            academic_period=period).exists()
+        if has_results or has_attendance or has_weights:
             messages.error(
                 request,
                 'This academic period cannot be deleted because it has '
-                'results or attendance.',
+                'results, assessment weights, or attendance.',
             )
         else:
             period.delete()
@@ -723,7 +732,12 @@ def _report_card_pdf(
         request, user, student, academic_period, export_format='pdf'):
     results_queryset = StudentResult.objects.filter(
         student=student,
-        student__academic_period=academic_period,
+    ).filter(
+        Q(academic_period=academic_period)
+        | Q(
+            academic_period__isnull=True,
+            student__academic_period=academic_period,
+        )
     )
     if user.user_type == '3':
         if student.teacher_id != user.teacher.pk:
@@ -732,34 +746,63 @@ def _report_card_pdf(
             Q(subject__teacher__teacher=user)
             | Q(subject__teacher__isnull=True))
     results = list(results_queryset.select_related(
-        'subject').order_by('subject__name'))
+        'subject', 'academic_period', 'student__academic_period'
+    ).order_by('subject__name'))
     if not results:
         return None
 
     grade_bands = list(GradeBand.objects.order_by('minimum_score'))
+    test_counts = []
+    for result in results:
+        weights = get_assessment_weights(
+            result.subject, result.academic_period or academic_period)
+        test_counts.append(len(get_test_weights(weights)) or 5)
+    test_count = max(test_counts, default=1)
     rows = []
     totals = []
     for result in results:
-        total = result.test + result.exam
+        weights = get_assessment_weights(
+            result.subject, result.academic_period or academic_period)
+        total = calculate_final_mark(result, weights)
         band = get_grade_band(total, grade_bands)
-        totals.append(total)
-        rows.append([
-            result.subject.name,
-            f'{result.test:g}',
-            f'{result.exam:g}',
-            f'{total:g}',
+        if total is not None:
+            totals.append(total)
+        row = [result.subject.name]
+        configured_tests = get_test_weights(weights) or [
+            (f'Test {number}', None) for number in range(1, 6)
+        ]
+        test_scores = get_test_scores(result, weights)
+        for number in range(test_count):
+            if number >= len(configured_tests):
+                row.append('')
+                continue
+            test_name, weight_value = configured_tests[number]
+            score = test_scores[number] if number < len(test_scores) else 0
+            weight = f'{weight_value:g}%' if weights else 'Not configured'
+            row.append(f'{score:g} / {weight}')
+        exam_weight = f'{weights.exam_weight:g}%' if weights else 'Not configured'
+        row.append(f'{result.exam:g} / {exam_weight}')
+        row.extend([
+            f'{total:g}' if total is not None else 'Weights not configured',
             band.symbol if isinstance(band, GradeBand) else band,
             band.description if isinstance(band, GradeBand) else '',
             band.remark if isinstance(band, GradeBand) else '',
         ])
+        rows.append(row)
 
     return _export_data(
         request,
         user,
         'Learner Report Card',
         [
-            'Subject', 'Test / CA', 'Examination', 'Total',
-            'Grade', 'Description', 'Band remark',
+            'Subject',
+            *[f'Test {number} score / weight'
+              for number in range(1, test_count + 1)],
+            'Exam score / weight',
+            'Final mark',
+            'Grade',
+            'Description',
+            'Band remark',
         ],
         rows,
         export_format,
@@ -770,7 +813,13 @@ def _report_card_pdf(
             f'<b>Academic Period:</b> {escape(str(academic_period))}',
         ],
         postamble=[
-            f'<b>Overall average total:</b> {sum(totals) / len(totals):.2f}',
+            (
+                f'<b>Overall average final mark:</b> '
+                f'{sum(totals) / len(totals):.2f}'
+                if totals else
+                '<b>Overall average final mark:</b> Not calculated; '
+                'assessment weights are not configured.'
+            ),
             '<b>Class teacher remarks:</b>',
             '________________________________________________________________________________',
             '<b>Principal remarks:</b>',
@@ -817,20 +866,65 @@ def _report_data(report_type, course, academic_period, subject, user=None):
             student__course=course,
             student__academic_period=academic_period,
         ).filter(
+            Q(academic_period=academic_period)
+            | Q(
+                academic_period__isnull=True,
+                student__academic_period=academic_period,
+            )
+        ).filter(
             Q(subject__course=course) | Q(subject__course__isnull=True)
         ).select_related('student__admin', 'subject').order_by(
             'student__admin__last_name', 'student__admin__first_name', 'subject__name')
         if subject:
             results = results.filter(subject=subject)
-        rows = [[
-            f'{result.student.admin.first_name} {result.student.admin.last_name}',
-            result.subject.name,
-            f'{result.test:g}',
-            f'{result.exam:g}',
-            f'{result.test + result.exam:g}',
-        ] for result in results]
+        results = list(results)
+        grade_bands = list(GradeBand.objects.order_by('minimum_score'))
+        test_counts = []
+        for result in results:
+            weights = get_assessment_weights(result.subject, academic_period)
+            test_counts.append(len(get_test_weights(weights)) or 5)
+        test_count = max(test_counts, default=1)
+        rows = []
+        for result in results:
+            weights = get_assessment_weights(result.subject, academic_period)
+            total = calculate_final_mark(result, weights)
+            band = get_grade_band(total, grade_bands)
+            configured_tests = get_test_weights(weights) or [
+                (f'Test {number}', None) for number in range(1, 6)
+            ]
+            test_scores = get_test_scores(result, weights)
+            test_values = []
+            for number in range(test_count):
+                if number >= len(configured_tests):
+                    test_values.append('')
+                    continue
+                _, weight = configured_tests[number]
+                score = test_scores[number] if number < len(test_scores) else 0
+                test_values.append(
+                    f'{score:g} / {weight:g}%'
+                    if weights else
+                    f'{score:g} / Not configured'
+                )
+            rows.append([
+                f'{result.student.admin.first_name} {result.student.admin.last_name}',
+                result.subject.name,
+                *test_values,
+                (
+                    f'{result.exam:g} / {weights.exam_weight:g}%'
+                    if weights else f'{result.exam:g} / Not configured'
+                ),
+                f'{total:g}' if total is not None else 'Weights not configured',
+                band.symbol if isinstance(band, GradeBand) else band,
+            ])
         return f'Learner Results - {course.name} - {academic_period}', [
-            'Learner name', 'Subject', 'Test / CA', 'Exam', 'Total'], rows
+            'Learner name',
+            'Subject',
+            *[f'Test {number} score / weight'
+              for number in range(1, test_count + 1)],
+            'Exam score / weight',
+            'Final mark',
+            'Grade',
+        ], rows
 
     if report_type == 'attendance_summary':
         learner_queryset = students.filter(
@@ -938,15 +1032,16 @@ def _create_report_pdf(
     body.append(table)
     body.extend(
         Paragraph(line, cell_style) for line in (postamble or []))
+    pagesize = landscape(A4) if len(headers) >= 8 else A4
     document = SimpleDocTemplate(
-        buffer, pagesize=A4, rightMargin=16 * mm, leftMargin=16 * mm,
+        buffer, pagesize=pagesize, rightMargin=16 * mm, leftMargin=16 * mm,
         topMargin=42 * mm, bottomMargin=22 * mm,
         title=title, author=display_name)
     crest_path = _report_crest_path()
 
     def draw_page(canvas, doc):
         canvas.saveState()
-        page_width, page_height = A4
+        page_width, page_height = pagesize
         if doc.page == 1 and crest_path:
             try:
                 canvas.drawImage(
@@ -1493,24 +1588,133 @@ def edit_subject(request, subject_id):
     return render(request, 'hod_template/edit_subject_template.html', context)
 
 
+def manage_assessment_weights(request):
+    if request.user.user_type != '3':
+        return redirect(reverse('admin_home'))
+
+    subjects = visible_subjects(request.user)
+    if request.method == 'POST':
+        subject_id = request.POST.get('subject', '')
+        period_id = request.POST.get('academic_period', '')
+        selected_subject = (
+            subjects.filter(pk=int(subject_id)).first()
+            if subject_id.isdigit() and len(subject_id) <= 10
+            else None
+        )
+        selected_period = (
+            AcademicPeriod.objects.filter(pk=int(period_id)).first()
+            if period_id.isdigit() and len(period_id) <= 10
+            else None
+        )
+        existing = (
+            AssessmentWeight.objects.filter(
+                subject=selected_subject,
+                academic_period=selected_period,
+            ).first()
+            if selected_subject and selected_period
+            else None
+        )
+        form = AssessmentWeightForm(
+            request.POST,
+            instance=existing,
+            user=request.user,
+        )
+        if form.is_valid():
+            form.save()
+            messages.success(
+                request,
+                'Assessment weights saved for this subject and academic period.',
+            )
+            return redirect(reverse('manage_assessment_weights'))
+    else:
+        subject_id = request.GET.get('subject', '')
+        period_id = request.GET.get('academic_period', '')
+        selected_subject = None
+        if subject_id.isdigit() and len(subject_id) <= 10:
+            selected_subject = subjects.filter(pk=int(subject_id)).first()
+        selected_period = None
+        if period_id.isdigit() and len(period_id) <= 10:
+            selected_period = AcademicPeriod.objects.filter(
+                pk=int(period_id)).first()
+        existing = (
+            AssessmentWeight.objects.filter(
+                subject=selected_subject,
+                academic_period=selected_period,
+            ).first()
+            if selected_subject and selected_period else None
+        )
+        initial = {}
+        if selected_subject:
+            initial['subject'] = selected_subject
+        if selected_period:
+            initial['academic_period'] = selected_period
+        else:
+            current_period = AcademicPeriod.objects.filter(
+                is_current=True).first()
+            if current_period:
+                initial['academic_period'] = current_period
+        form = AssessmentWeightForm(
+            instance=existing,
+            initial=initial,
+            user=request.user,
+        )
+
+    return render(request, 'hod_template/manage_assessment_weights.html', {
+        'form': form,
+        'page_title': 'Assessment Weights',
+    })
+
+
 def manage_student_results(request):
-    form = StudentResultForm(request.POST or None, user=request.user)
-    results = list(visible_results(request.user).order_by(
-            'student__admin__last_name', 'student__admin__first_name',
-            'subject__name').annotate(
-                total_score=ExpressionWrapper(
-                    F('test') + F('exam'), output_field=FloatField())))
+    form_initial = {}
+    if request.method == 'GET':
+        for field_name, model in (
+            ('subject', Subject),
+            ('academic_period', AcademicPeriod),
+        ):
+            value = request.GET.get(field_name, '')
+            if value.isdigit() and len(value) <= 10:
+                selected = model.objects.filter(pk=int(value)).first()
+                if selected:
+                    form_initial[field_name] = selected
+    form = StudentResultForm(
+        request.POST if request.method == 'POST' else None,
+        initial=form_initial,
+        user=request.user,
+    )
+    results = list(visible_results(request.user).select_related(
+        'subject', 'academic_period', 'student__academic_period',
+    ).order_by(
+        'student__admin__last_name',
+        'student__admin__first_name',
+        'subject__name',
+    ))
     grade_bands = list(GradeBand.objects.order_by('minimum_score'))
     for result in results:
+        result.assessment_weights = get_assessment_weights(
+            result.subject,
+            result.academic_period or result.student.academic_period,
+        )
+        result.total_score = calculate_final_mark(
+            result, result.assessment_weights)
         result.grade_band = get_grade_band(result.total_score, grade_bands)
         result.grade_symbol = (
             result.grade_band.symbol
             if isinstance(result.grade_band, GradeBand)
             else result.grade_band
         )
+        test_weights = get_test_weights(result.assessment_weights) or [
+            (f'Test {number}', None) for number in range(1, 6)
+        ]
+        test_scores = get_test_scores(result, result.assessment_weights)
+        result.test_assessment_values = [
+            (name, score)
+            for (name, _), score in zip(test_weights, test_scores)
+        ]
     context = {
         'form': form,
         'results': results,
+        'score_maximum': settings.SIMS_MAX_TOTAL_SCORE,
         'page_title': 'Manage Learner Results',
     }
     if request.method == 'POST':
@@ -1533,6 +1737,7 @@ def edit_student_result(request, result_id):
     context = {
         'form': form,
         'result': result,
+        'score_maximum': settings.SIMS_MAX_TOTAL_SCORE,
         'page_title': 'Update Learner Result',
         'button_text': 'Save Changes',
     }
