@@ -1882,7 +1882,7 @@ class GradeBandAndReportCardTests(TestCase):
         self.assertEqual(weights.test_1_weight, 10)
         self.assertEqual(weights.exam_weight, 50)
 
-    def test_teacher_can_add_custom_number_of_tests_and_calculate_result(self):
+    def test_teacher_can_add_tests_beyond_five_and_calculate_result(self):
         from .grading import calculate_final_mark
 
         learner = CustomUser.objects.create_user(
@@ -1903,9 +1903,13 @@ class GradeBandAndReportCardTests(TestCase):
         response = self.client.post(reverse('manage_assessment_weights'), {
             'subject': subject.pk,
             'academic_period': academic_period.pk,
-            'test_count': '2',
-            'test_1_weight': '30',
-            'test_2_weight': '30',
+            'test_count': '6',
+            'test_1_weight': '10',
+            'test_2_weight': '10',
+            'test_3_weight': '10',
+            'test_4_weight': '10',
+            'test_5_weight': '10',
+            'test_6_weight': '10',
             'exam_weight': '40',
         })
         self.assertRedirects(
@@ -1918,8 +1922,8 @@ class GradeBandAndReportCardTests(TestCase):
         self.assertEqual(
             weights.test_weights,
             [
-                {'name': 'Test 1', 'weight': '30'},
-                {'name': 'Test 2', 'weight': '30'},
+                {'name': f'Test {number}', 'weight': '10'}
+                for number in range(1, 7)
             ],
         )
         response = self.client.get(
@@ -1929,14 +1933,18 @@ class GradeBandAndReportCardTests(TestCase):
                 'academic_period': academic_period.pk,
             },
         )
-        self.assertContains(response, 'Test 2 score')
+        self.assertContains(response, 'Test 6 score')
 
         response = self.client.post(reverse('manage_student_results'), {
             'student': learner.student.pk,
             'subject': subject.pk,
             'academic_period': academic_period.pk,
-            'test_1': '80',
-            'test_2': '90',
+            'test_1': '50',
+            'test_2': '60',
+            'test_3': '70',
+            'test_4': '80',
+            'test_5': '90',
+            'test_6': '100',
             'exam': '100',
         })
         self.assertRedirects(
@@ -1945,12 +1953,15 @@ class GradeBandAndReportCardTests(TestCase):
             fetch_redirect_response=False,
         )
         result = StudentResult.objects.get(student=learner.student)
-        self.assertEqual(result.test_scores, {'Test 1': 80, 'Test 2': 90})
-        self.assertEqual(calculate_final_mark(result, weights), 91)
+        self.assertEqual(result.test_scores, {
+            f'Test {number}': score
+            for number, score in enumerate((50, 60, 70, 80, 90, 100), 1)
+        })
+        self.assertEqual(calculate_final_mark(result, weights), 85)
 
         self.client.force_login(learner)
         learner_results = self.client.get(reverse('student_view_result'))
-        self.assertContains(learner_results, 'Test 2: 90')
+        self.assertContains(learner_results, 'Test 6: 100')
 
         self.client.force_login(self.teacher)
         report_card = self.client.post(reverse('generate_report_card'), {
@@ -1959,8 +1970,8 @@ class GradeBandAndReportCardTests(TestCase):
             'export_format': 'csv',
         })
         self.assertEqual(report_card.status_code, 200)
-        self.assertIn(b'Test 2 score / weight', report_card.content)
-        self.assertIn(b'90 / 30%', report_card.content)
+        self.assertIn(b'Test 6 score / weight', report_card.content)
+        self.assertIn(b'100 / 10%', report_card.content)
 
     def test_teacher_cannot_set_weights_for_another_teachers_subject(self):
         other_teacher = CustomUser.objects.create_user(
