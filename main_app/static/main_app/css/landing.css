@@ -1,0 +1,278 @@
+body.sims-login-page {
+    display: block;
+    min-width: 320px;
+    min-height: 100vh;
+    padding: 0;
+    background: #f5f6f7;
+    color: #263238;
+}
+
+.sims-topbar {
+    display: flex;
+    min-height: 2.5rem;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.45rem max(1rem, calc((100% - 1120px) / 2));
+    background: #e6e8e9;
+    color: #374047;
+    font-size: 0.875rem;
+}
+
+.sims-login-shell {
+    width: min(1120px, calc(100% - 2rem));
+    margin: 0 auto;
+}
+
+.sims-brand {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.25rem 0 1.5rem;
+}
+
+.sims-brand .school-crest {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.sims-brand .school-crest img {
+    height: 76px;
+}
+
+.sims-brand h1 {
+    margin: 0;
+    font-size: clamp(1.2rem, 3vw, 1.75rem);
+    font-weight: 600;
+    line-height: 1.25;
+}
+
+.sims-card-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    align-items: stretch;
+    gap: 1.5rem;
+}
+
+.sims-card {
+    min-width: 0;
+    overflow: hidden;
+    border: 0;
+    border-radius: 0.35rem;
+    background: #fff;
+    box-shadow: 0 0.35rem 1.25rem rgba(35, 48, 56, 0.12);
+}
+
+.sims-card__header {
+    min-height: 3.25rem;
+    padding: 0.85rem 1.25rem;
+}
+
+.sims-card__header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.sims-card__header--green {
+    background: #2f7d4a;
+    color: #fff;
+}
+
+.sims-card__header--yellow {
+    background: #f2c230;
+    color: #263238;
+}
+
+.sims-card__body {
+    min-width: 0;
+    padding: 1.5rem;
+    overflow-wrap: anywhere;
+}
+
+.sims-info-card .sims-card__body {
+    font-size: 1rem;
+    line-height: 1.65;
+}
+
+.sims-info-card p:last-child {
+    margin-bottom: 0;
+}
+
+.sims-register-link {
+    margin-top: 1.5rem;
+}
+
+.sims-register-link a {
+    color: #24653b;
+    font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 0.15em;
+}
+
+.sims-role-picker {
+    min-width: 0;
+    margin: 0 0 1.5rem;
+    padding: 0;
+    border: 0;
+}
+
+.sims-role-picker legend {
+    float: none;
+    width: auto;
+    margin-bottom: 0.75rem;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.sims-role-picker__options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem 1.25rem;
+}
+
+.sims-role-picker__options label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    cursor: pointer;
+    font-weight: 400;
+}
+
+.sims-role-picker input[type="radio"] {
+    width: 1rem;
+    height: 1rem;
+    margin: 0;
+    accent-color: #2f7d4a;
+}
+
+.sims-role-panel .input-group {
+    display: flex;
+    width: 100%;
+    flex-wrap: nowrap;
+    align-items: stretch;
+}
+
+.sims-role-panel .input-group > .form-control {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.sims-role-panel .input-group-append {
+    display: flex;
+}
+
+.sims-login-page input:focus,
+.sims-login-page button:focus,
+.sims-login-page a:focus {
+    outline: 3px solid #236f43;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 2px #fff;
+}
+
+.sims-login-button {
+    min-width: 7rem;
+    border-color: #d7a80f;
+    background: #f2c230;
+    color: #263238;
+    font-weight: 600;
+}
+
+.sims-login-button:hover,
+.sims-login-button:active {
+    border-color: #2f7d4a;
+    background: #2f7d4a;
+    color: #fff;
+}
+
+.sims-message {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: 0.25rem;
+    background: #e8f3eb;
+    color: #205a34;
+}
+
+.sims-message--error {
+    background: #f8e6e6;
+    color: #8a1f1f;
+}
+
+.sims-no-script {
+    margin-top: 1.25rem;
+    padding: 1rem;
+    border: 1px solid #d5dadc;
+    border-radius: 0.25rem;
+    background: #fff;
+}
+
+.sims-no-script p {
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+}
+
+.sims-no-script a {
+    display: inline-block;
+    margin-right: 1rem;
+    text-decoration: underline;
+}
+
+.sims-footer-rule {
+    height: 1px;
+    margin: 2rem 0 1.5rem;
+    background: #cbd0d2;
+}
+
+.sims-role-panel[hidden] {
+    display: none !important;
+}
+
+@media (max-width: 800px) {
+    .sims-card-grid {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 1rem;
+    }
+
+    .sims-signin-card {
+        order: 1;
+    }
+
+    .sims-info-card {
+        order: 2;
+    }
+
+    .sims-brand {
+        padding: 1rem 0 1.25rem;
+    }
+}
+
+@media (max-width: 480px) {
+    .sims-topbar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.15rem;
+        padding: 0.5rem 0.75rem;
+    }
+
+    .sims-login-shell {
+        width: calc(100% - 1.5rem);
+    }
+
+    .sims-brand {
+        align-items: flex-start;
+        gap: 0.65rem;
+    }
+
+    .sims-brand .school-crest img {
+        height: 60px;
+    }
+
+    .sims-card__body {
+        padding: 1rem;
+    }
+
+    .sims-role-picker__options {
+        gap: 0.6rem 0.85rem;
+    }
+}

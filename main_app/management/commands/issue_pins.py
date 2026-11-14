@@ -43,7 +43,7 @@ class Command(BaseCommand):
         )
         if any(not user.username for user in users):
             raise CommandError(
-                'Run create_usernames first so every account has a username.')
+                'Run create_usernames first so every account has an account ID.')
 
         issued_at = timezone.now()
         updates = []
@@ -78,7 +78,7 @@ class Command(BaseCommand):
             ) as output_file:
                 temporary_path = Path(output_file.name)
                 writer = csv.writer(output_file)
-                writer.writerow(['name', 'role', 'username', 'PIN'])
+                writer.writerow(['name', 'role', 'account_id', 'PIN'])
                 writer.writerows(rows)
 
             with transaction.atomic():

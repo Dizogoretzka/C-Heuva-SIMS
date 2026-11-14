@@ -104,6 +104,69 @@ tr th {
     height: 132px;
 }
 
+.school-profile-logo {
+    max-width: 180px;
+    max-height: 120px;
+    object-fit: contain;
+}
+
+.credential-sheet-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #87909a;
+}
+
+.credential-sheet-logo {
+    width: 72px;
+    height: 72px;
+    object-fit: contain;
+}
+
+.credential-sheet-header h1 {
+    margin: 0;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.4rem;
+    font-weight: 700;
+}
+
+.credential-sheet-header p {
+    margin: 0.2rem 0 0;
+}
+
+.credential-sheet-title {
+    margin: 1rem 0 0.25rem;
+    text-align: center;
+    text-decoration: underline;
+    font-size: 1.25rem;
+}
+
+.credential-sheet-generated {
+    margin-bottom: 1rem;
+    text-align: center;
+}
+
+.credential-sheet-footer {
+    margin-top: 1rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid #87909a;
+    color: #b00020;
+    font-weight: 700;
+    text-align: center;
+}
+
+.nav-sidebar .nav-link.active {
+    color: #212529;
+    background-color: #f2c230;
+    border-left: 4px solid #fff;
+    font-weight: 700;
+}
+
+.nav-sidebar .nav-link.active .nav-icon {
+    color: #212529;
+}
+
 .brand-link {
     display: flex;
     align-items: center;
@@ -142,12 +205,59 @@ body.sidebar-collapse .brand-link .brand-image {
     margin: 0;
 }
 
+@media print {
+    @page {
+        size: A4;
+        margin: 15mm;
+    }
+
+    .main-sidebar,
+    .main-header,
+    .main-footer,
+    .content-header,
+    .credential-sheet .alert,
+    .credential-sheet .card-footer {
+        display: none !important;
+    }
+
+    .content-wrapper {
+        margin-left: 0 !important;
+    }
+
+    .credential-sheet {
+        margin: 0;
+        padding: 0;
+    }
+
+    .credential-sheet .card {
+        border: 0;
+        box-shadow: none;
+    }
+
+    .credential-sheet .card-header {
+        padding-left: 0;
+        padding-right: 0;
+    }
+
+    .credential-sheet .card-body {
+        padding: 0;
+    }
+}
+
 .login-page .login-box {
     width: min(360px, calc(100vw - 2rem));
 }
 
 .registration-page .login-box {
     width: min(480px, calc(100vw - 2rem));
+    margin: 0 auto;
+}
+
+.registration-page {
+    display: block;
+    min-height: 100vh;
+    padding-top: 1rem;
+    padding-bottom: 1rem;
 }
 
 .content,

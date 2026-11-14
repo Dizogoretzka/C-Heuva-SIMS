@@ -1,38 +1,13 @@
-import re
-
-from django.conf import settings
 from django import forms
+from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-from django.core.validators import MaxValueValidator
-from django.db.models import Q
 from django.forms.widgets import DateInput, TextInput
-from django.forms.formsets import BaseFormSet
-from django.forms import formset_factory
 
 from .credentials import verify_pin
-from .grading import (
-    get_assessment_weights,
-    get_test_scores,
-    get_test_weights,
-)
 from .models import *
-from .models import grade_ordered_courses
-
-
-def validate_unique_username(value, user=None):
-    username = value.strip().lower()
-    if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{3,19}', username):
-        raise forms.ValidationError(
-            'Use 4-20 letters, digits, dots, underscores, or hyphens; '
-            'the first character must be a letter or digit.')
-    matching_users = CustomUser.objects.filter(username__iexact=username)
-    if user:
-        matching_users = matching_users.exclude(pk=user.pk)
-    if matching_users.exists():
-        raise forms.ValidationError(
-            'An account with this username already exists.')
-    return username
+from .class_parser import ClassLabelError, parse_class_label
+from .models import ordered_school_classes
 
 
 class FormSettings(forms.ModelForm):
@@ -44,15 +19,6 @@ class FormSettings(forms.ModelForm):
 
 
 class CustomUserForm(FormSettings):
-    username = forms.CharField(
-        min_length=4,
-        max_length=20,
-        label='Username',
-        help_text=(
-            '4-20 characters; letters, digits, dots, underscores, and '
-            'hyphens only; start with a letter or digit.'
-        ),
-    )
     gender = forms.ChoiceField(choices=[('M', 'Male'), ('F', 'Female')])
     first_name = forms.CharField(required=True)
     last_name = forms.CharField(required=True)
@@ -77,31 +43,46 @@ class CustomUserForm(FormSettings):
         else:
             self.account_user = None
 
-    def clean_username(self):
-        return validate_unique_username(
-            self.cleaned_data['username'],
-            user=self.account_user,
-        )
-
     class Meta:
         model = CustomUser
         fields = [
-            'first_name', 'last_name', 'username', 'gender', 'password',
+            'first_name', 'last_name', 'gender', 'password',
             'profile_pic', 'address',
         ]
 
 
 class StudentForm(CustomUserForm):
+    grade_and_class = forms.CharField(
+        required=False,
+        label='Grade and class',
+        help_text='Examples: 8A, 8 a, 9',
+    )
+
     def __init__(self, *args, **kwargs):
         super(StudentForm, self).__init__(*args, **kwargs)
-        self.fields['course'].queryset = grade_ordered_courses()
+        school_class = getattr(self.instance, 'school_class', None)
+        if school_class and school_class.grade_number is not None:
+            self.fields['grade_and_class'].initial = (
+                f'{school_class.grade_number}{school_class.class_letter.upper()}'
+            )
         if not self.is_bound and not self.instance.academic_period_id:
             self.fields['academic_period'].initial = AcademicPeriod.objects.filter(
                 is_current=True).first()
 
+    def clean_grade_and_class(self):
+        value = self.cleaned_data.get('grade_and_class', '')
+        try:
+            parse_class_label(value)
+        except ClassLabelError as error:
+            raise forms.ValidationError(str(error)) from error
+        return value
+
     class Meta(CustomUserForm.Meta):
         model = Student
-        fields = CustomUserForm.Meta.fields + ['course', 'academic_period']
+        fields = (
+            CustomUserForm.Meta.fields
+            + ['grade_and_class', 'academic_period']
+        )
 
 
 class AdminForm(CustomUserForm):
@@ -113,333 +94,78 @@ class AdminForm(CustomUserForm):
         fields = CustomUserForm.Meta.fields
 
 
-class SubjectForm(FormSettings):
-    def __init__(self, *args, user=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields['course'].queryset = grade_ordered_courses()
-
-    class Meta:
-        model = Subject
-        fields = ['name', 'course']
-
-
-class StudentResultForm(FormSettings):
-    def __init__(self, *args, user=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        maximum = settings.SIMS_MAX_TOTAL_SCORE
-        self.fields['academic_period'].queryset = AcademicPeriod.objects.order_by(
-            '-year', 'term', '-start_year')
-        if not self.is_bound and not self.instance.pk:
-            self.fields['academic_period'].initial = AcademicPeriod.objects.filter(
-                is_current=True).first()
-        if user and user.user_type == '3':
-            self.fields['student'].queryset = Student.objects.filter(
-                teacher__teacher=user).select_related('admin')
-            self.fields['subject'].queryset = Subject.objects.filter(
-                Q(teacher__teacher=user) | Q(teacher__isnull=True))
-        subject = self._selected_model('subject', Subject)
-        academic_period = self._selected_model(
-            'academic_period', AcademicPeriod)
-        weights = get_assessment_weights(subject, academic_period)
-        configured_tests = get_test_weights(weights) if weights else []
-        test_scores = get_test_scores(self.instance, weights)
-        self.assessment_test_fields = []
-        test_names = (
-            [name for name, _ in configured_tests]
-            or ['Test 1']
-        )
-        for number, name in enumerate(test_names, start=1):
-            field_name = f'test_{number}'
-            self.fields[field_name] = forms.FloatField(
-                min_value=0,
-                max_value=maximum,
-                label=f'{name} score',
-                initial=(
-                    test_scores[number - 1]
-                    if self.instance.pk and number <= len(test_scores)
-                    else None
-                ),
-                validators=[MaxValueValidator(maximum)],
-                widget=forms.NumberInput(attrs={
-                    'class': 'form-control',
-                    'max': maximum,
-                    'step': 'any',
-                }),
-            )
-            self.assessment_test_fields.append(self[field_name])
-        ordered_fields = {
-            name: self.fields[name]
-            for name in ('student', 'subject', 'academic_period')
-        }
-        ordered_fields.update({
-            f'test_{number}': self.fields[f'test_{number}']
-            for number in range(1, len(test_names) + 1)
-        })
-        ordered_fields['exam'] = self.fields['exam']
-        self.fields = ordered_fields
-        self.fields['exam'].max_value = maximum
-        self.fields['exam'].validators.append(MaxValueValidator(maximum))
-        self.fields['exam'].widget.attrs.update({
-            'max': maximum,
-            'step': 'any',
-        })
-
-    def _selected_model(self, field_name, model):
-        if self.is_bound:
-            value = self.data.get(self.add_prefix(field_name))
-        elif self.instance.pk:
-            value = getattr(self.instance, f'{field_name}_id', None)
-        else:
-            value = self.initial.get(field_name)
-            if hasattr(value, 'pk'):
-                value = value.pk
-        if not value:
-            return None
-        try:
-            return model.objects.filter(pk=int(value)).first()
-        except (TypeError, ValueError):
-            return None
-
-    def clean(self):
-        cleaned_data = super().clean()
-        student = cleaned_data.get('student')
-        subject = cleaned_data.get('subject')
-        if (
-            student and subject and subject.course_id
-            and subject.course_id != student.course_id
-        ):
-            self.add_error(
-                'subject',
-                "Choose a subject assigned to the learner's grade or school-wide.",
-            )
-        academic_period = cleaned_data.get('academic_period')
-        if student and subject and academic_period and not get_assessment_weights(
-            subject, academic_period
-        ):
-            self.add_error(
-                'subject',
-                'Configure assessment weights totaling 100% for this '
-                'subject and academic period before entering results.',
-            )
-        return cleaned_data
-
-    def save(self, commit=True):
-        result = super().save(commit=False)
-        weights = get_assessment_weights(
-            result.subject,
-            result.academic_period or result.student.academic_period,
-        )
-        configured_tests = get_test_weights(weights) if weights else []
-        test_names = (
-            [name for name, _ in configured_tests]
-            or [f'Test {number}' for number in range(
-                1, len(self.assessment_test_fields) + 1)]
-        )
-        result.test_scores = {
-            name: self.cleaned_data[f'test_{number}']
-            for number, name in enumerate(test_names, start=1)
-        }
-        for number in range(1, 6):
-            setattr(
-                result,
-                f'test_{number}',
-                result.test_scores.get(f'Test {number}', 0),
-            )
-        if commit:
-            result.save()
-            self.save_m2m()
-        return result
-
-    class Meta:
-        model = StudentResult
-        fields = [
-            'student',
-            'subject',
-            'academic_period',
-            'exam',
-        ]
-        labels = {
-            'student': 'Learner',
-            'academic_period': 'Academic Period',
-            'exam': 'Exam score',
-        }
-
-
-class AssessmentWeightForm(FormSettings):
-    test_count = forms.IntegerField(
+class ManageResultsFilterForm(forms.Form):
+    school_class = forms.ModelChoiceField(
+        queryset=ordered_school_classes(),
         required=False,
-        min_value=1,
-        widget=forms.HiddenInput(),
+        label='Class',
+    )
+    subject = forms.ModelChoiceField(
+        queryset=Subject.objects.none(),
+        required=False,
+        label='Subject',
+    )
+    academic_period = forms.ModelChoiceField(
+        queryset=AcademicPeriod.objects.order_by(
+            '-year', '-term', '-start_year'),
+        required=False,
+        label='Academic period',
     )
 
-    class Meta:
-        model = AssessmentWeight
-        fields = [
-            'subject',
-            'academic_period',
-            'exam_weight',
-        ]
-        labels = {
-            'subject': 'Subject',
-            'academic_period': 'Academic Period',
-            'exam_weight': 'Exam weight (%)',
-        }
-        widgets = {
-            'exam_weight': forms.NumberInput(
-                attrs={'min': 0, 'max': 100, 'step': '0.01'})
-        }
-
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['subject'].queryset = Subject.objects.order_by('name')
-        self.fields['academic_period'].queryset = AcademicPeriod.objects.order_by(
-            '-year', 'term', '-start_year')
+        classes = ordered_school_classes()
+        subjects = Subject.objects.filter(
+            school_class__isnull=False).select_related(
+                'school_class', 'teacher__teacher')
         if user and user.user_type == '3':
-            self.fields['subject'].queryset = self.fields[
-                'subject'
-            ].queryset.filter(
-                Q(teacher__teacher=user) | Q(teacher__isnull=True)
-            )
-        existing_tests = (
-            get_test_weights(self.instance)
-            if self.instance and self.instance.pk
-            else []
-        )
+            classes = classes.filter(
+                teacher_setups__teacher__teacher=user).distinct()
+            subjects = subjects.filter(
+                teacher__teacher=user,
+                school_class__teacher_setups__teacher__teacher=user,
+            ).distinct()
+        self.fields['school_class'].queryset = classes
+        self.fields['subject'].queryset = subjects
         if self.is_bound:
-            indices = [
-                int(match.group(1))
-                for key in self.data
-                if (match := re.fullmatch(
-                    re.escape(self.add_prefix('test_'))
-                    + r'(\d+)_weight', key))
-            ]
-            inferred_count = max(indices, default=1)
-            count_value = inferred_count
-            submitted_count = self.data.get(
-                self.add_prefix('test_count'))
-            self.test_count_mismatch = False
-            if submitted_count:
-                try:
-                    self.test_count_mismatch = (
-                        int(submitted_count) != inferred_count)
-                except ValueError:
-                    self.test_count_mismatch = True
+            class_id = self.data.get(self.add_prefix('school_class'), '')
+            if str(class_id).isdigit():
+                self.fields['subject'].queryset = subjects.filter(
+                    school_class_id=int(class_id))
         else:
-            count_value = len(existing_tests) or 1
-            self.test_count_mismatch = False
-        try:
-            self.test_count = max(1, int(count_value))
-        except (TypeError, ValueError):
-            self.test_count = 1
-        self.fields['test_count'].initial = self.test_count
-        for number in range(1, self.test_count + 1):
-            field_name = f'test_{number}_weight'
-            initial = (
-                existing_tests[number - 1][1]
-                if number <= len(existing_tests)
-                else None
-            )
-            self.fields[field_name] = forms.DecimalField(
-                min_value=0,
-                max_value=100,
-                label=f'Test {number} weight (%)',
-                initial=initial,
-                widget=forms.NumberInput(attrs={
-                    'min': 0, 'max': 100, 'step': '0.01',
-                    'class': 'form-control',
-                }),
-            )
-        ordered_fields = {
-            name: self.fields[name]
-            for name in ('subject', 'academic_period', 'test_count')
-        }
-        ordered_fields.update({
-            f'test_{number}_weight': self.fields[f'test_{number}_weight']
-            for number in range(1, self.test_count + 1)
-        })
-        ordered_fields['exam_weight'] = self.fields['exam_weight']
-        self.fields = ordered_fields
-        self.assessment_test_fields = [
-            self[f'test_{number}_weight']
-            for number in range(1, self.test_count + 1)
-        ]
+            current_period = AcademicPeriod.objects.filter(
+                is_current=True).first()
+            if current_period:
+                self.fields['academic_period'].initial = current_period
+        for field in self.fields.values():
+            field.widget.attrs['class'] = 'form-control'
 
     def clean(self):
         cleaned_data = super().clean()
-        if self.test_count_mismatch:
-            self.add_error(
-                'test_count',
-                'The assessment rows changed unexpectedly. Please review them.',
-            )
-        weights = [
-            cleaned_data.get(f'test_{number}_weight')
-            for number in range(1, self.test_count + 1)
-        ]
-        weights.append(cleaned_data.get('exam_weight'))
-        if all(weight is not None for weight in weights):
-            total = sum(weights)
-            if total != 100:
-                raise ValidationError(
-                    f'Assessment weights must total exactly 100%. '
-                    f'The current total is {total}%.')
-        return cleaned_data
-
-    def _post_clean(self):
-        if all(
-            self.cleaned_data.get(f'test_{number}_weight') is not None
-            for number in range(1, self.test_count + 1)
+        school_class = cleaned_data.get('school_class')
+        subject = cleaned_data.get('subject')
+        if (
+            school_class and subject
+            and subject.school_class_id != school_class.pk
         ):
-            self.instance.test_weights = [
-                {
-                    'name': f'Test {number}',
-                    'weight': str(
-                        self.cleaned_data[f'test_{number}_weight']),
-                }
-                for number in range(1, self.test_count + 1)
-            ]
-            for number in range(1, 6):
-                self.instance.__dict__[f'test_{number}_weight'] = (
-                    self.cleaned_data[f'test_{number}_weight']
-                    if number <= self.test_count
-                    else 0
-                )
-        super()._post_clean()
-
-    def save(self, commit=True):
-        instance = super().save(commit=False)
-        instance.test_weights = [
-            {
-                'name': f'Test {number}',
-                'weight': str(self.cleaned_data[f'test_{number}_weight']),
-            }
-            for number in range(1, self.test_count + 1)
-        ]
-        legacy_count = min(self.test_count, 5)
-        for number in range(1, 6):
-            setattr(
-                instance,
-                f'test_{number}_weight',
-                self.cleaned_data[f'test_{number}_weight']
-                if number <= legacy_count
-                else 0,
-            )
-        if commit:
-            instance.save()
-            self.save_m2m()
-        return instance
+            self.add_error(
+                'subject', 'Choose a subject set up for the selected class.')
+        return cleaned_data
 
 
 class ReportGenerationForm(forms.Form):
     REPORT_TYPES = (
         ('school_summary', 'School Summary'),
         ('class_list', 'Class List'),
-        ('learner_results', 'Learner Results'),
-        ('attendance_summary', 'Attendance Summary'),
+        ('learner_results', 'Results Mark Sheet'),
     )
 
     report_type = forms.ChoiceField(choices=REPORT_TYPES, label='Report type')
-    course = forms.ModelChoiceField(
-        queryset=Course.objects.all(), required=False, label='Course / grade')
+    school_class = forms.ModelChoiceField(
+        queryset=ordered_school_classes(),
+        required=False,
+        label='Class',
+    )
     academic_period = forms.ModelChoiceField(
         queryset=AcademicPeriod.objects.all(), required=False, label='Academic Period')
     subject = forms.ModelChoiceField(
@@ -447,7 +173,7 @@ class ReportGenerationForm(forms.Form):
 
     def __init__(self, *args, role='admin', user=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['course'].queryset = grade_ordered_courses()
+        self.fields['school_class'].queryset = ordered_school_classes()
         if not self.is_bound:
             self.fields['academic_period'].initial = (
                 AcademicPeriod.objects.filter(is_current=True).first())
@@ -455,32 +181,36 @@ class ReportGenerationForm(forms.Form):
             self.fields['report_type'].choices = (
                 ('class_list', 'Class List'),
                 ('learner_results', 'Learner Results'),
-                ('attendance_summary', 'Attendance Summary'),
             )
             if user:
-                self.fields['course'].queryset = self.fields[
-                    'course'].queryset.filter(
-                        student__teacher__teacher=user).distinct()
+                self.fields['school_class'].queryset = self.fields[
+                    'school_class'].queryset.filter(
+                        teacher_setups__teacher__teacher=user).distinct()
                 self.fields['subject'].queryset = Subject.objects.filter(
-                    Q(teacher__teacher=user) | Q(teacher__isnull=True))
+                    teacher__teacher=user,
+                    school_class__in=self.fields['school_class'].queryset,
+                    school_class__teacher_setups__teacher__teacher=user,
+                )
         else:
             self.fields['report_type'].choices = (
                 ('school_summary', 'School Summary'),
                 ('class_list', 'Class List'),
             )
         self.fields['report_type'].widget.attrs['class'] = 'form-control'
-        for name in ('course', 'academic_period', 'subject'):
+        for name in ('school_class', 'academic_period', 'subject'):
             self.fields[name].widget.attrs['class'] = 'form-control'
         if self.is_bound:
-            course_id = self.data.get('course')
-            if course_id:
-                self.fields['subject'].queryset = Subject.objects.filter(
-                    Q(course_id=course_id) | Q(course__isnull=True))
+            school_class_id = self.data.get('school_class')
+            if school_class_id and str(school_class_id).isdigit():
                 if role == 'teacher' and user:
-                    self.fields['subject'].queryset = self.fields[
-                        'subject'].queryset.filter(
-                            Q(teacher__teacher=user)
-                            | Q(teacher__isnull=True))
+                    self.fields['subject'].queryset = Subject.objects.filter(
+                        school_class_id=school_class_id,
+                        teacher__teacher=user,
+                        school_class__teacher_setups__teacher__teacher=user,
+                    )
+                else:
+                    self.fields['subject'].queryset = Subject.objects.filter(
+                        school_class_id=school_class_id)
 
     def clean(self):
         cleaned_data = super().clean()
@@ -488,39 +218,33 @@ class ReportGenerationForm(forms.Form):
         if report_type == 'school_summary':
             return cleaned_data
 
-        if report_type != 'school_summary' and not cleaned_data.get('course'):
-            self.add_error('course', 'Choose a course or grade.')
+        if (
+            report_type != 'school_summary'
+            and not cleaned_data.get('school_class')
+        ):
+            self.add_error('school_class', 'Choose a class.')
         if report_type != 'school_summary' and not cleaned_data.get('academic_period'):
             self.add_error('academic_period', 'Choose an academic period.')
+        if (
+            report_type == 'learner_results'
+            and not cleaned_data.get('subject')
+        ):
+            self.add_error('subject', 'Choose a subject for the results mark sheet.')
         return cleaned_data
-
-
-class LoginActivityFilterForm(forms.Form):
-    learner = forms.CharField(
-        required=False,
-        max_length=120,
-        label='Learner name or username',
-    )
-    date = forms.DateField(
-        required=False,
-        widget=DateInput(attrs={'type': 'date'}),
-        label='Login date',
-    )
-    course = forms.ModelChoiceField(
-        queryset=grade_ordered_courses(),
-        required=False,
-        label='Course / grade',
-    )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields['course'].queryset = grade_ordered_courses()
-        for field in self.fields.values():
-            field.widget.attrs['class'] = 'form-control'
 
 
 class ActivityLogFilterForm(forms.Form):
     search = forms.CharField(required=False, max_length=120, label='Search')
+    role = forms.ChoiceField(
+        required=False,
+        label='Role',
+        choices=(
+            ('', 'All roles'),
+            ('2', 'Learner'),
+            ('3', 'Teacher'),
+            ('1', 'Administrator'),
+        ),
+    )
     action = forms.ChoiceField(
         required=False,
         choices=(('', 'All activity'),) + ActivityLog.ACTIONS,
@@ -550,116 +274,6 @@ class ActivityLogFilterForm(forms.Form):
         return cleaned_data
 
 
-class GradeBandEntryForm(forms.Form):
-    from_score = forms.IntegerField(
-        required=False,
-        min_value=0,
-        label='From',
-        widget=forms.NumberInput(attrs={'step': 1}),
-    )
-    to_score = forms.IntegerField(
-        required=False,
-        min_value=0,
-        label='To',
-        widget=forms.NumberInput(attrs={'step': 1}),
-    )
-    symbol = forms.CharField(
-        required=False,
-        max_length=3,
-        label='Symbol',
-    )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        maximum = settings.SIMS_MAX_TOTAL_SCORE
-        for name in ('from_score', 'to_score'):
-            self.fields[name].max_value = maximum
-            self.fields[name].validators.append(MaxValueValidator(maximum))
-        self.fields['from_score'].widget.attrs.update(
-            {'min': 0, 'max': maximum, 'step': 1})
-        self.fields['to_score'].widget.attrs.update(
-            {'min': 0, 'max': maximum, 'step': 1})
-        for field in self.fields.values():
-            field.widget.attrs['class'] = 'form-control'
-
-    def clean(self):
-        cleaned_data = super().clean()
-        raw_values = [
-            self.data.get(self.add_prefix(name), '').strip()
-            for name in self.fields
-        ] if self.is_bound else []
-        if not any(raw_values):
-            return cleaned_data
-
-        for name in self.fields:
-            if not self.data.get(self.add_prefix(name), '').strip():
-                self.add_error(name, 'Complete all three fields in this row.')
-
-        minimum = cleaned_data.get('from_score')
-        maximum = cleaned_data.get('to_score')
-        if (
-            minimum is not None
-            and maximum is not None
-            and minimum > maximum
-        ):
-            self.add_error('to_score', 'To must be greater than or equal to From.')
-        if cleaned_data.get('symbol'):
-            cleaned_data['symbol'] = cleaned_data['symbol'].strip()
-            if not cleaned_data['symbol']:
-                self.add_error('symbol', 'Enter a symbol.')
-        return cleaned_data
-
-
-class GradeBandFormSet(BaseFormSet):
-    def clean(self):
-        super().clean()
-        if any(form.errors for form in self.forms):
-            return
-
-        populated = [
-            (index, form.cleaned_data)
-            for index, form in enumerate(self.forms, start=1)
-            if form.cleaned_data.get('symbol')
-        ]
-        if not populated:
-            raise forms.ValidationError('Enter at least one grade band.')
-
-        symbols = {}
-        for index, row in populated:
-            key = row['symbol'].casefold()
-            if key in symbols:
-                form = self.forms[index - 1]
-                other_form = self.forms[symbols[key] - 1]
-                form.add_error('symbol', 'This symbol is already used.')
-                other_form.add_error('symbol', 'This symbol is duplicated.')
-            else:
-                symbols[key] = index
-
-        ranges = sorted(
-            (row['from_score'], row['to_score'], index)
-            for index, row in populated
-        )
-        for position, (minimum, maximum, index) in enumerate(ranges):
-            for other_minimum, other_maximum, other_index in ranges[position + 1:]:
-                if other_minimum > maximum:
-                    break
-                self.forms[index - 1].add_error(
-                    'from_score',
-                    f'This range overlaps row {other_index}.')
-                self.forms[other_index - 1].add_error(
-                    'from_score',
-                    f'This range overlaps row {index}.')
-
-
-GradeBandFormSetFactory = formset_factory(
-    GradeBandEntryForm,
-    formset=GradeBandFormSet,
-    extra=8,
-    max_num=8,
-    validate_max=True,
-)
-
-
 class ReportCardForm(forms.Form):
     student = forms.ModelChoiceField(
         queryset=Student.objects.select_related('admin').order_by(
@@ -678,53 +292,10 @@ class ReportCardForm(forms.Form):
                 AcademicPeriod.objects.filter(is_current=True).first())
         if user and user.user_type == '3':
             self.fields['student'].queryset = Student.objects.filter(
-                teacher__teacher=user).select_related('admin').order_by(
+                teacher_requests__teacher__teacher=user,
+                teacher_requests__status=LearnerTeacherRequest.ACCEPTED,
+            ).select_related('admin').distinct().order_by(
                     'admin__last_name', 'admin__first_name')
-        for field in self.fields.values():
-            field.widget.attrs['class'] = 'form-control'
-
-
-class AttendanceSelectionForm(forms.Form):
-    course = forms.ModelChoiceField(
-        queryset=grade_ordered_courses(),
-        label='Course / grade',
-    )
-    subject = forms.ModelChoiceField(
-        queryset=Subject.objects.order_by('name'),
-        label='Subject',
-    )
-    academic_period = forms.ModelChoiceField(
-        queryset=AcademicPeriod.objects.order_by('-start_year'),
-        label='Academic Period',
-    )
-    date = forms.DateField(
-        widget=DateInput(attrs={'type': 'date'}),
-        label='Attendance date',
-    )
-
-    def __init__(self, *args, user=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        if not self.is_bound:
-            self.fields['academic_period'].initial = (
-                AcademicPeriod.objects.filter(is_current=True).first())
-        if user and user.user_type == '3':
-            self.fields['course'].queryset = grade_ordered_courses().filter(
-                student__teacher__teacher=user).distinct()
-            self.fields['subject'].queryset = Subject.objects.filter(
-                Q(teacher__teacher=user) | Q(teacher__isnull=True))
-        course_id = self.data.get('course') if self.is_bound else None
-        if course_id:
-            self.fields['subject'].queryset = Subject.objects.filter(
-                Q(course_id=course_id) | Q(course__isnull=True)
-            ).order_by('name')
-            if user and user.user_type == '3':
-                self.fields['subject'].queryset = self.fields[
-                    'subject'].queryset.filter(
-                        Q(teacher__teacher=user) | Q(teacher__isnull=True))
-            if user and user.user_type == '3':
-                self.fields['subject'].queryset = self.fields[
-                    'subject'].queryset.filter(
-                        Q(teacher__teacher=user) | Q(teacher__isnull=True))
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 
@@ -758,6 +329,18 @@ class AcademicPeriodForm(FormSettings):
         return cleaned_data
 
 
+class SchoolProfileForm(FormSettings):
+    class Meta:
+        model = SchoolProfile
+        fields = (
+            'school_name', 'postal_address', 'phone_numbers', 'motto',
+            'principal_name', 'logo',
+        )
+        widgets = {
+            'postal_address': forms.Textarea(attrs={'rows': 3}),
+        }
+
+
 class LearnerImportUploadForm(forms.Form):
     file = forms.FileField(
         label='Learner CSV or XLSX file',
@@ -788,29 +371,16 @@ class LearnerImportOptionsForm(forms.Form):
         queryset=AcademicPeriod.objects.order_by('-year', 'term'),
         label='Academic Period',
     )
-    teacher = forms.ModelChoiceField(
-        queryset=Teacher.objects.select_related('teacher').order_by(
-            'teacher__last_name', 'teacher__first_name'),
-        required=False,
-        label='Assign learners to teacher',
-    )
-
     def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
         if not self.is_bound:
             self.fields['academic_period'].initial = (
                 AcademicPeriod.objects.filter(is_current=True).first())
-        if user and user.user_type == '3':
-            self.fields.pop('teacher')
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 
     def clean(self):
         cleaned_data = super().clean()
-        course = cleaned_data.get('course')
-        subject = cleaned_data.get('subject')
-        if course and subject and subject.course_id not in (None, course.pk):
-            self.add_error('subject', 'Choose a subject for this course/grade.')
         return cleaned_data
 
 
@@ -821,11 +391,11 @@ class TeacherGradeFilterForm(forms.Form):
         required=False,
         empty_label='All teachers',
     )
-    course = forms.ModelChoiceField(
-        queryset=grade_ordered_courses(),
+    school_class = forms.ModelChoiceField(
+        queryset=ordered_school_classes(),
         required=False,
-        label='Grade',
-        empty_label='All grades',
+        label='Class',
+        empty_label='All classes',
     )
 
     def __init__(self, *args, **kwargs):
@@ -834,31 +404,54 @@ class TeacherGradeFilterForm(forms.Form):
             field.widget.attrs['class'] = 'form-control'
 
 
-class LearnerAssignmentForm(forms.Form):
-    learners = forms.ModelMultipleChoiceField(
-        queryset=Student.objects.select_related('admin').order_by(
-            'admin__last_name', 'admin__first_name'),
-        widget=forms.SelectMultiple(attrs={'size': 12}),
-    )
-    teacher = forms.ModelChoiceField(
-        queryset=Teacher.objects.select_related('teacher').order_by(
-            'teacher__last_name', 'teacher__first_name'),
-        required=False,
-        empty_label='Unassigned',
+class TeacherClassSetupForm(forms.Form):
+    grade_and_class = forms.CharField(
+        label='Grade and class',
+        help_text='Examples: 8A, 8 a, 9',
+        max_length=32,
     )
 
+    def clean_grade_and_class(self):
+        value = self.cleaned_data['grade_and_class']
+        try:
+            parsed = parse_class_label(value)
+        except ClassLabelError as error:
+            raise ValidationError(str(error)) from error
+        if parsed is None:
+            raise ValidationError('Enter a grade and class.')
+        return value
 
-class SubjectAssignmentForm(forms.Form):
-    subjects = forms.ModelMultipleChoiceField(
-        queryset=Subject.objects.order_by('name'),
-        widget=forms.SelectMultiple(attrs={'size': 12}),
+
+class TeacherSubjectSetupForm(forms.Form):
+    school_class = forms.ModelChoiceField(
+        queryset=SchoolClass.objects.none(),
+        label='Class',
     )
-    teacher = forms.ModelChoiceField(
-        queryset=Teacher.objects.select_related('teacher').order_by(
-            'teacher__last_name', 'teacher__first_name'),
+    name = forms.CharField(max_length=Subject._meta.get_field('name').max_length)
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['school_class'].queryset = SchoolClass.objects.filter(
+            teacher_setups__teacher__teacher=user).order_by(
+                'grade_number', 'class_letter')
+        for field in self.fields.values():
+            field.widget.attrs['class'] = 'form-control'
+
+
+class TeacherRequestFilterForm(forms.Form):
+    school_class = forms.ModelChoiceField(
+        queryset=SchoolClass.objects.none(),
         required=False,
-        empty_label='School-wide / unassigned',
+        label='Class',
+        empty_label='All classes',
     )
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['school_class'].queryset = SchoolClass.objects.filter(
+            teacher_setups__teacher__teacher=user).order_by(
+                'grade_number', 'class_letter')
+        self.fields['school_class'].widget.attrs['class'] = 'form-control'
 
 
 class LeaveReportStudentForm(FormSettings):
@@ -895,14 +488,9 @@ class StudentEditForm(CustomUserForm):
 class RegistrationForm(forms.Form):
     first_name = forms.CharField(max_length=150, label='First name')
     last_name = forms.CharField(max_length=150, label='Last name')
-    username = forms.CharField(
-        min_length=4,
-        max_length=20,
-        label='Username',
-        help_text=(
-            '4-20 characters; letters, digits, dots, underscores, and '
-            'hyphens only; start with a letter or digit.'
-        ),
+    grade_and_class = forms.CharField(
+        label='Grade and class',
+        help_text='Examples: 8A, 8 a, 9',
     )
     gender = forms.ChoiceField(
         choices=CustomUser.GENDER,
@@ -942,8 +530,13 @@ class RegistrationForm(forms.Form):
         self.fields['profile_pic'].help_text = (
             'Optional. JPG, JPEG, or PNG; maximum file size 5 MB.')
 
-    def clean_username(self):
-        return validate_unique_username(self.cleaned_data['username'])
+    def clean_grade_and_class(self):
+        value = self.cleaned_data['grade_and_class']
+        try:
+            parse_class_label(value)
+        except ClassLabelError as error:
+            raise forms.ValidationError(str(error)) from error
+        return value
 
     def clean_profile_pic(self):
         picture = self.cleaned_data.get('profile_pic')
@@ -977,15 +570,6 @@ class LearnerRegistrationForm(RegistrationForm):
 class TeacherAccountForm(forms.Form):
     first_name = forms.CharField(max_length=150, label='First name')
     last_name = forms.CharField(max_length=150, label='Last name')
-    username = forms.CharField(
-        min_length=4,
-        max_length=20,
-        label='Username',
-        help_text=(
-            '4-20 characters; letters, digits, dots, underscores, and '
-            'hyphens only; start with a letter or digit.'
-        ),
-    )
     gender = forms.ChoiceField(
         choices=CustomUser.GENDER,
         widget=forms.RadioSelect,
@@ -998,19 +582,12 @@ class TeacherAccountForm(forms.Form):
         if user:
             self.fields['first_name'].initial = user.first_name
             self.fields['last_name'].initial = user.last_name
-            self.fields['username'].initial = user.username
             self.fields['gender'].initial = user.gender
         self.fields['profile_pic'].help_text = (
             'Optional. JPG, JPEG, or PNG; maximum file size 5 MB.')
         for name, field in self.fields.items():
             if name != 'gender':
                 field.widget.attrs['class'] = 'form-control'
-
-    def clean_username(self):
-        return validate_unique_username(
-            self.cleaned_data['username'],
-            user=self.user,
-        )
 
     def clean_profile_pic(self):
         picture = self.cleaned_data.get('profile_pic')
@@ -1030,6 +607,11 @@ class TeacherAccountForm(forms.Form):
 class ProfileUpdateForm(forms.Form):
     first_name = forms.CharField(max_length=150, label='First name')
     last_name = forms.CharField(max_length=150, label='Last name')
+    grade_and_class = forms.CharField(
+        required=False,
+        label='Grade and class',
+        help_text='Examples: 8A, 8 a, 9',
+    )
     profile_pic = forms.ImageField(
         required=False,
         label='Profile picture',
@@ -1059,11 +641,20 @@ class ProfileUpdateForm(forms.Form):
         label='Generate a new PIN',
     )
 
-    def __init__(self, *args, user, **kwargs):
+    def __init__(self, *args, user, student=None, **kwargs):
         self.user = user
         super().__init__(*args, **kwargs)
         self.fields['first_name'].initial = user.first_name
         self.fields['last_name'].initial = user.last_name
+        if user.user_type == '2':
+            school_class = getattr(student, 'school_class', None)
+            if school_class and school_class.grade_number is not None:
+                self.fields['grade_and_class'].initial = (
+                    f'{school_class.grade_number}'
+                    f'{school_class.class_letter.upper()}'
+                )
+        else:
+            self.fields.pop('grade_and_class')
         self.fields['profile_pic'].help_text = (
             'Optional. JPG, JPEG, or PNG; maximum file size 5 MB.')
         if user.user_type == '1':
@@ -1071,8 +662,6 @@ class ProfileUpdateForm(forms.Form):
                 'current_password',
                 'new_password',
                 'confirm_password',
-                'current_pin',
-                'reset_pin',
             ):
                 self.fields.pop(name)
         elif user.user_type == '3':
@@ -1085,6 +674,11 @@ class ProfileUpdateForm(forms.Form):
         else:
             self.fields.pop('current_pin')
             self.fields.pop('reset_pin')
+        if user.user_type in ('1', '3'):
+            self.fields['reset_pin'].label = 'Reset my PIN'
+            self.fields['reset_pin'].help_text = (
+                'Enter your current PIN to verify your identity. A new PIN '
+                'will be generated and shown once.')
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 
@@ -1104,18 +698,30 @@ class ProfileUpdateForm(forms.Form):
                 'The uploaded file must be a valid JPG, JPEG, or PNG image.')
         return picture
 
+    def clean_grade_and_class(self):
+        value = self.cleaned_data.get('grade_and_class')
+        if value is None:
+            return value
+        try:
+            parse_class_label(value)
+        except ClassLabelError as error:
+            raise forms.ValidationError(str(error)) from error
+        return value
+
     def clean(self):
         cleaned_data = super().clean()
-        if self.user.user_type == '1':
-            return cleaned_data
-        if self.user.user_type == '3':
+        if self.user.user_type in ('1', '3'):
             if not cleaned_data.get('reset_pin'):
                 return cleaned_data
             current_pin = cleaned_data.get('current_pin')
             if not self.user.pin_hash:
                 self.add_error(
                     'current_pin',
-                    'No current PIN is set. Ask an administrator to issue one.')
+                    (
+                        'No current PIN is set.'
+                        if self.user.user_type == '1'
+                        else 'No current PIN is set. Ask an administrator to issue one.'
+                    ))
             elif not current_pin:
                 self.add_error('current_pin', 'Enter your current PIN.')
             elif not verify_pin(current_pin, self.user.pin_hash):

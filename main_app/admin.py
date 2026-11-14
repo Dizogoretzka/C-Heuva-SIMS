@@ -6,11 +6,20 @@ from .models import *
 admin.site.register(Student)
 admin.site.register(Teacher)
 admin.site.register(Subject)
-admin.site.register(Course)
 admin.site.register(AcademicPeriod)
 admin.site.register(StudentResult)
-admin.site.register(Attendance)
-admin.site.register(AttendanceReport)
+admin.site.register(AssessmentPlan)
+admin.site.register(Assessment)
+admin.site.register(SchoolProfile)
+
+
+@admin.register(SchoolClass)
+class SchoolClassAdmin(admin.ModelAdmin):
+    list_display = ('grade_number', 'class_letter')
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).filter(
+            grade_number__isnull=False)
 
 
 @admin.register(ActivityLog)

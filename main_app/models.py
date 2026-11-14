@@ -1,5 +1,7 @@
 from decimal import Decimal, InvalidOperation
+import uuid
 
+from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import UserManager
 from django.contrib.auth.signals import user_logged_in
@@ -9,14 +11,14 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import RegexValidator
 from django.db.models import (
-    Case,
-    IntegerField,
     Q,
-    Value,
-    When,
 )
 from django.db.models.functions import Lower
-from django.db.models.functions import Cast, Substr
+from django.core.validators import MaxValueValidator, MinValueValidator
+from django.utils import timezone
+
+from .account_ids import generate_account_id
+from .class_parser import format_class_label, parse_class_label
 
 
 
@@ -58,17 +60,15 @@ class CustomUser(AbstractUser):
     
     
     username = models.CharField(
-        max_length=20,
+        verbose_name='account ID',
+        max_length=160,
         unique=True,
         blank=True,
         null=True,
         validators=[
             RegexValidator(
-                regex=r'^[A-Za-z0-9][A-Za-z0-9._-]{3,19}$',
-                message=(
-                    'Usernames must be 4 to 20 characters and use only '
-                    'letters, digits, dots, underscores, and hyphens.'
-                ),
+                regex=r'^[\w][\w.-]{1,159}$',
+                message='Account IDs must contain at least two characters.',
             ),
         ],
     )
@@ -100,6 +100,14 @@ class CustomUser(AbstractUser):
     def __str__(self):
         return self.last_name + ", " + self.first_name
 
+    def save(self, *args, **kwargs):
+        if not self.username and self.first_name and self.last_name:
+            existing_ids = CustomUser.objects.exclude(
+                pk=self.pk).values_list('username', flat=True)
+            self.username = generate_account_id(
+                self.first_name, self.last_name, existing_ids)
+        super().save(*args, **kwargs)
+
 
 class Admin(models.Model):
     admin = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
@@ -116,13 +124,46 @@ class Teacher(models.Model):
         )
 
 
-class Course(models.Model):
-    name = models.CharField(max_length=120)
+class SchoolClass(models.Model):
+    grade_number = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(12)],
+    )
+    class_letter = models.CharField(max_length=1, blank=True, default='')
+    legacy_label = models.CharField(max_length=120, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['grade_number', 'class_letter'],
+                condition=Q(grade_number__isnull=False),
+                name='unique_school_class_grade_letter',
+            ),
+        ]
+        ordering = ['grade_number', 'class_letter']
+
     def __str__(self):
-        return self.name
+        return format_class_label(self.grade_number, self.class_letter)
+
+
+def ordered_school_classes():
+    return SchoolClass.objects.filter(
+        grade_number__isnull=False).order_by('grade_number', 'class_letter')
+
+
+def school_class_from_label(value):
+    parsed = parse_class_label(value)
+    if parsed is None:
+        return None
+    grade_number, class_letter = parsed
+    school_class, _ = SchoolClass.objects.get_or_create(
+        grade_number=grade_number,
+        class_letter=class_letter,
+    )
+    return school_class
 
 
 class AcademicPeriod(models.Model):
@@ -168,27 +209,8 @@ class AcademicPeriod(models.Model):
         return f'Academic period {self.pk}'
 
 
-def grade_ordered_courses():
-    grade_number = Cast(Substr('name', 7), IntegerField())
-    return Course.objects.annotate(
-        _grade_order=Case(
-            When(name__regex=r'^Grade [0-9]+$', then=grade_number),
-            default=Value(1000),
-            output_field=IntegerField(),
-        ),
-    ).order_by('_grade_order', 'name')
-
-
-
 class Student(models.Model):
     admin = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
-    teacher = models.ForeignKey(
-        Teacher,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='learners',
-    )
     created_by = models.ForeignKey(
         Teacher,
         on_delete=models.SET_NULL,
@@ -196,8 +218,8 @@ class Student(models.Model):
         blank=True,
         related_name='created_learners',
     )
-    course = models.ForeignKey(
-        Course, on_delete=models.SET_NULL, null=True, blank=True)
+    school_class = models.ForeignKey(
+        SchoolClass, on_delete=models.SET_NULL, null=True, blank=True)
     academic_period = models.ForeignKey(
         AcademicPeriod, on_delete=models.SET_NULL, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
@@ -209,6 +231,128 @@ class Student(models.Model):
 
     def __str__(self):
         return self.admin.last_name + ", " + self.admin.first_name
+
+
+class LearnerImportBatch(models.Model):
+    PREVIEW = 'preview'
+    PROCESSING = 'processing'
+    COMPLETED = 'completed'
+    FAILED = 'failed'
+    STATUS_CHOICES = (
+        (PREVIEW, 'Preview'),
+        (PROCESSING, 'Processing'),
+        (COMPLETED, 'Completed'),
+        (FAILED, 'Failed'),
+    )
+
+    token = models.UUIDField(
+        default=uuid.uuid4, unique=True, editable=False)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='learner_import_batches',
+    )
+    rows = models.JSONField(default=list)
+    total_rows = models.PositiveIntegerField(default=0)
+    imported_rows = models.PositiveIntegerField(default=0)
+    status = models.CharField(
+        max_length=12, choices=STATUS_CHOICES, default=PREVIEW)
+    academic_period = models.ForeignKey(
+        'AcademicPeriod', null=True, blank=True, on_delete=models.SET_NULL)
+    teacher = models.ForeignKey(
+        'Teacher', null=True, blank=True, on_delete=models.SET_NULL)
+    error_message = models.TextField(blank=True, default='')
+    credentials_acknowledged_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at', '-pk']
+
+
+class ReportCardPublication(models.Model):
+    teacher = models.ForeignKey(
+        Teacher,
+        on_delete=models.CASCADE,
+        related_name='report_card_publications',
+    )
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.CASCADE,
+        related_name='report_card_publications',
+    )
+    academic_period = models.ForeignKey(
+        AcademicPeriod,
+        on_delete=models.CASCADE,
+        related_name='report_card_publications',
+    )
+    published_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['teacher', 'student', 'academic_period'],
+                name='unique_teacher_learner_period_report_card',
+            ),
+        ]
+        ordering = ['-published_at', '-pk']
+
+
+class TeacherClassSetup(models.Model):
+    teacher = models.ForeignKey(
+        Teacher, on_delete=models.CASCADE, related_name='class_setups')
+    school_class = models.ForeignKey(
+        SchoolClass, on_delete=models.CASCADE, related_name='teacher_setups')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['teacher', 'school_class'],
+                name='unique_teacher_school_class_setup',
+            ),
+        ]
+        ordering = ['school_class__grade_number', 'school_class__class_letter']
+
+    def __str__(self):
+        return f'{self.teacher} — {self.school_class}'
+
+
+class LearnerTeacherRequest(models.Model):
+    PENDING = 'pending'
+    ACCEPTED = 'accepted'
+    DECLINED = 'declined'
+    CANCELLED = 'cancelled'
+    STATUS_CHOICES = (
+        (PENDING, 'Pending'),
+        (ACCEPTED, 'Accepted'),
+        (DECLINED, 'Declined'),
+        (CANCELLED, 'Cancelled'),
+    )
+
+    student = models.ForeignKey(
+        Student, on_delete=models.CASCADE, related_name='teacher_requests')
+    teacher = models.ForeignKey(
+        Teacher, on_delete=models.CASCADE, related_name='learner_requests')
+    school_class = models.ForeignKey(
+        SchoolClass,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='learner_requests',
+    )
+    status = models.CharField(
+        max_length=10, choices=STATUS_CHOICES, default=PENDING)
+    requested_at = models.DateTimeField(default=timezone.now)
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-requested_at', '-pk']
+
+    def __str__(self):
+        return (
+            f'{self.student} — {self.teacher} ({self.get_status_display()})')
 
 
 class Subject(models.Model):
@@ -227,10 +371,22 @@ class Subject(models.Model):
         blank=True,
         related_name='created_subjects',
     )
-    course = models.ForeignKey(
-        Course, on_delete=models.SET_NULL, null=True, blank=True)
+    school_class = models.ForeignKey(
+        SchoolClass, on_delete=models.SET_NULL, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['teacher', 'school_class', 'name'],
+                condition=Q(
+                    teacher__isnull=False,
+                    school_class__isnull=False,
+                ),
+                name='unique_configured_teacher_class_subject',
+            ),
+        ]
 
     def __str__(self):
         return self.name
@@ -302,44 +458,6 @@ class ActivityLog(models.Model):
         return f'{self.get_action_display()}: {self.description}'
 
 
-class GradeBand(models.Model):
-    symbol = models.CharField(max_length=10)
-    minimum_score = models.FloatField()
-    maximum_score = models.FloatField()
-    description = models.CharField(max_length=120, blank=True, default='')
-    remark = models.TextField(blank=True)
-
-    class Meta:
-        ordering = ['minimum_score', 'maximum_score', 'symbol']
-
-    def __str__(self):
-        return f'{self.symbol} ({self.minimum_score:g}-{self.maximum_score:g})'
-
-    def clean(self):
-        from django.core.exceptions import ValidationError
-
-        errors = {}
-        if (
-            self.minimum_score is not None
-            and self.maximum_score is not None
-            and self.minimum_score > self.maximum_score
-        ):
-            errors['minimum_score'] = (
-                'Minimum score cannot be greater than maximum score.')
-        elif (
-            self.minimum_score is not None
-            and self.maximum_score is not None
-            and GradeBand.objects.exclude(pk=self.pk).filter(
-                minimum_score__lte=self.maximum_score,
-                maximum_score__gte=self.minimum_score,
-            ).exists()
-        ):
-            errors['minimum_score'] = (
-                'This score range overlaps an existing grade band.')
-        if errors:
-            raise ValidationError(errors)
-
-
 class LeaveReportStudent(models.Model):
     student = models.ForeignKey(
         Student, on_delete=models.CASCADE, verbose_name='learner')
@@ -403,6 +521,8 @@ class StudentResult(models.Model):
     test_4 = models.FloatField(default=0)
     test_5 = models.FloatField(default=0)
     test_scores = models.JSONField(default=dict, blank=True)
+    assessment_scores = models.JSONField(default=dict, blank=True)
+    is_previous_record = models.BooleanField(default=False)
     exam = models.FloatField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -420,123 +540,124 @@ class StudentResult(models.Model):
         self.test_1 = value
 
 
-class AssessmentWeight(models.Model):
+class AssessmentPlan(models.Model):
+    school_class = models.ForeignKey(
+        SchoolClass,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='assessment_plans',
+    )
     subject = models.ForeignKey(
         Subject,
         on_delete=models.CASCADE,
-        related_name='assessment_weights',
+        related_name='assessment_plans',
     )
     academic_period = models.ForeignKey(
         AcademicPeriod,
         on_delete=models.CASCADE,
-        related_name='assessment_weights',
+        null=True,
+        blank=True,
+        related_name='assessment_plans',
     )
-    test_1_weight = models.DecimalField(max_digits=5, decimal_places=2)
-    test_2_weight = models.DecimalField(max_digits=5, decimal_places=2)
-    test_3_weight = models.DecimalField(max_digits=5, decimal_places=2)
-    test_4_weight = models.DecimalField(max_digits=5, decimal_places=2)
-    test_5_weight = models.DecimalField(max_digits=5, decimal_places=2)
-    test_weights = models.JSONField(default=list, blank=True)
-    exam_weight = models.DecimalField(max_digits=5, decimal_places=2)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=['subject', 'academic_period'],
-                name='unique_subject_period_assessment_weights',
+                fields=['school_class', 'subject', 'academic_period'],
+                name='unique_class_subject_period_assessment_plan',
             ),
         ]
-        ordering = ['academic_period__year', 'academic_period__term', 'subject__name']
+        ordering = [
+            'school_class__grade_number',
+            'school_class__class_letter',
+            'academic_period__year',
+            'academic_period__term',
+            'subject__name',
+        ]
 
     def __str__(self):
-        return f'{self.subject} - {self.academic_period} assessment weights'
+        return f'{self.school_class} - {self.subject} - {self.academic_period}'
+
+
+class Assessment(models.Model):
+    plan = models.ForeignKey(
+        AssessmentPlan,
+        on_delete=models.CASCADE,
+        related_name='assessments',
+    )
+    name = models.CharField(max_length=100)
+    weight = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    maximum_mark = models.DecimalField(
+        max_digits=7, decimal_places=2, default=100)
+    position = models.PositiveIntegerField(default=0)
+    is_previous_record = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['position', 'pk']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['plan', 'name'],
+                name='unique_assessment_name_per_plan',
+            ),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class RecycleBinEntry(models.Model):
+    owner = models.ForeignKey(
+        CustomUser,
+        on_delete=models.CASCADE,
+        related_name='recycle_bin_entries',
+    )
+    record_type = models.CharField(max_length=40)
+    record_label = models.CharField(max_length=255)
+    object_count = models.PositiveIntegerField(default=0)
+    snapshot = models.JSONField()
+    deleted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-deleted_at', '-pk']
 
     def clean(self):
         from django.core.exceptions import ValidationError
 
-        test_weights = self.test_weights or [
-            {'name': f'Test {number}',
-             'weight': str(getattr(self, f'test_{number}_weight'))}
-            for number in range(1, 6)
-        ]
-        if not self.test_weights and any(
-            getattr(self, f'test_{number}_weight') is None
-            for number in range(1, 6)
-        ):
-            return
-        try:
-            weights = [Decimal(str(test['weight'])) for test in test_weights]
-            weights.append(Decimal(str(self.exam_weight)))
-        except (KeyError, TypeError, ValueError, InvalidOperation) as error:
-            raise ValidationError(
-                'Each test must have a valid percentage weight.') from error
-        if any(weight is None for weight in weights):
-            return
-        if any(weight < 0 or weight > 100 for weight in weights):
-            raise ValidationError(
-                'Each assessment weight must be between 0 and 100%.')
-        if not test_weights or sum(weights) != 100:
-            raise ValidationError(
-                'Assessment weights must total exactly 100%.')
+        errors = {}
+        if self.weight is not None and not Decimal('0') <= self.weight <= Decimal('100'):
+            errors['weight'] = 'Weight must be between 0 and 100%.'
+        if self.maximum_mark is not None and self.maximum_mark <= 0:
+            errors['maximum_mark'] = 'Maximum mark must be greater than zero.'
+        if errors:
+            raise ValidationError(errors)
 
-class Attendance(models.Model):
-    course = models.ForeignKey(Course, on_delete=models.CASCADE)
-    subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
-    academic_period = models.ForeignKey(
-        AcademicPeriod, on_delete=models.CASCADE)
-    created_by = models.ForeignKey(
-        Teacher,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='created_attendance',
+
+class SchoolProfile(models.Model):
+    school_name = models.CharField(
+        max_length=200,
+        default='C. Heuva Junior Secondary School',
     )
-    date = models.DateField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    postal_address = models.TextField(blank=True)
+    phone_numbers = models.CharField(max_length=200, blank=True)
+    motto = models.CharField(max_length=200, blank=True)
+    principal_name = models.CharField(max_length=150, blank=True)
+    logo = models.ImageField(blank=True, upload_to='school_profile/')
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=['course', 'subject', 'academic_period', 'date'],
-                name='unique_course_subject_academic_period_attendance_date',
-            ),
-        ]
-        ordering = ['-date', 'course__name', 'subject__name']
+        verbose_name = 'school profile'
+        verbose_name_plural = 'school profile'
 
     def __str__(self):
-        return f'{self.course} - {self.subject} - {self.date}'
-
-
-class AttendanceReport(models.Model):
-    attendance = models.ForeignKey(
-        Attendance, on_delete=models.CASCADE, related_name='records')
-    student = models.ForeignKey(
-        Student, on_delete=models.CASCADE, related_name='attendance_records')
-    created_by = models.ForeignKey(
-        Teacher,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='created_attendance_reports',
-    )
-    status = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=['attendance', 'student'],
-                name='unique_student_attendance_record',
-            ),
-        ]
+        return self.school_name
 
 
 @receiver(post_save, sender=CustomUser)
-def create_user_profile(sender, instance, created, **kwargs):
+def create_user_profile(sender, instance, created, raw=False, **kwargs):
+    if raw:
+        return
     if created:
         if instance.user_type == '1':
             Admin.objects.get_or_create(admin=instance)
@@ -547,7 +668,9 @@ def create_user_profile(sender, instance, created, **kwargs):
 
 
 @receiver(post_save, sender=CustomUser)
-def save_user_profile(sender, instance, **kwargs):
+def save_user_profile(sender, instance, raw=False, **kwargs):
+    if raw:
+        return
     if instance.user_type == '1':
         Admin.objects.get_or_create(admin=instance)
     elif instance.user_type == '2':

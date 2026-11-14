@@ -10,91 +10,90 @@
                     <div class="form-group col-md-4">
                         {{ field.label_tag }}
                         {{ field }}
+                        {% for error in field.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                        {% endfor %}
                     </div>
                     {% endfor %}
                     <div class="form-group col-md-4">
-                        <button type="submit" class="btn btn-secondary">Filter choices</button>
+                        <button type="submit" class="btn btn-secondary">Filter</button>
                         <a href="{% url 'manage_assignments' %}" class="btn btn-light">Clear</a>
                     </div>
                 </form>
+                <a class="btn btn-outline-danger"
+                   href="{% url 'manage_assignments' %}?{% if export_query %}{{ export_query }}&amp;{% endif %}export=pdf">PDF</a>
+                <a class="btn btn-outline-success"
+                   href="{% url 'manage_assignments' %}?{% if export_query %}{{ export_query }}&amp;{% endif %}export=csv">CSV</a>
             </div>
         </div>
-        <div class="row">
-            <div class="col-lg-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Assign learners</h3>
-                    </div>
-                    <form method="post">
-                        {% csrf_token %}
-                        <input type="hidden" name="assignment_type" value="learners">
-                        <div class="card-body">
-                            {% for field in learner_form %}
-                            <div class="form-group">
-                                {{ field.label_tag }}
-                                {{ field }}
-                                {% for error in field.errors %}
-                                <div class="text-danger">{{ error }}</div>
-                                {% endfor %}
-                            </div>
-                            {% endfor %}
-                            <p class="text-muted">Choose one or more learners. Choosing Unassigned clears their teacher assignment.</p>
-                        </div>
-                        <div class="card-footer">
-                            <button class="btn btn-primary" type="submit">Save learner assignments</button>
-                        </div>
-                    </form>
-                </div>
-                <div class="card">
-                    <div class="card-header"><h3 class="card-title">Unassigned learners</h3></div>
-                    <div class="card-body">
-                        <ul class="mb-0">
-                            {% for learner in unassigned_learners %}
-                            <li>{{ learner.admin.get_full_name|default:learner.admin.username }}{% if learner.course %} — {{ learner.course }}{% endif %}</li>
-                            {% empty %}
-                            <li>All learners are assigned.</li>
-                            {% endfor %}
-                        </ul>
-                    </div>
-                </div>
+
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Teacher classes and subjects</h3></div>
+            <div class="card-body table-responsive">
+                <table class="table table-bordered table-striped">
+                    <thead>
+                        <tr>
+                            <th>Teacher</th>
+                            <th>Class</th>
+                            <th>Subjects</th>
+                            <th>Accepted learners</th>
+                            <th>Pending</th>
+                            <th>Declined</th>
+                            <th>Learners</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in assignment_rows %}
+                        <tr>
+                            <td>{{ row.teacher.teacher.get_full_name|default:row.teacher.teacher.username }}</td>
+                            <td>{{ row.school_class|default:"Not set up" }}</td>
+                            <td>
+                                {% for subject in row.subjects %}
+                                {{ subject.name }}{% if not forloop.last %}, {% endif %}
+                                {% empty %}None{% endfor %}
+                            </td>
+                            <td>{{ row.accepted_count }}</td>
+                            <td>{{ row.pending_count }}</td>
+                            <td>{{ row.declined_count }}</td>
+                            <td>
+                                {% if row.learners_url %}
+                                <a href="{{ row.learners_url }}">View accepted learners</a>
+                                {% else %}—{% endif %}
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="7">No teacher setups match these filters.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
             </div>
-            <div class="col-lg-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Assign subjects</h3>
-                    </div>
-                    <form method="post">
-                        {% csrf_token %}
-                        <input type="hidden" name="assignment_type" value="subjects">
-                        <div class="card-body">
-                            {% for field in subject_form %}
-                            <div class="form-group">
-                                {{ field.label_tag }}
-                                {{ field }}
-                                {% for error in field.errors %}
-                                <div class="text-danger">{{ error }}</div>
-                                {% endfor %}
-                            </div>
-                            {% endfor %}
-                            <p class="text-muted">Choose one or more subjects. School-wide / unassigned makes them available across the school.</p>
-                        </div>
-                        <div class="card-footer">
-                            <button class="btn btn-primary" type="submit">Save subject assignments</button>
-                        </div>
-                    </form>
-                </div>
-                <div class="card">
-                    <div class="card-header"><h3 class="card-title">Unassigned school-wide subjects</h3></div>
-                    <div class="card-body">
-                        <ul class="mb-0">
-                            {% for subject in unassigned_subjects %}
-                            <li>{{ subject.name }}{% if subject.course %} — {{ subject.course }}{% endif %}</li>
-                            {% empty %}
-                            <li>All subjects have a teacher assignment.</li>
-                            {% endfor %}
-                        </ul>
-                    </div>
-                </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Unmatched learners</h3></div>
+            <div class="card-body">
+                <p>Learners whose class has no teacher setup are waiting to be matched.</p>
+                <ul class="mb-0">
+                    {% for learner in unmatched_learners %}
+                    <li>{{ learner.admin.get_full_name|default:learner.admin.username }} — {{ learner.school_class|default:"Not assigned to a class" }}</li>
+                    {% empty %}
+                    <li>No unmatched learners.</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Subjects not set up</h3></div>
+            <div class="card-body">
+                <p>These existing subjects have no complete teacher-and-class setup.</p>
+                <ul class="mb-0">
+                    {% for subject in unconfigured_subjects %}
+                    <li>{{ subject.name }} — Not set up</li>
+                    {% empty %}
+                    <li>No unconfigured subjects.</li>
+                    {% endfor %}
+                </ul>
             </div>
         </div>
     </div>

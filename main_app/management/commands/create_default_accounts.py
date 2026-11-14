@@ -13,9 +13,9 @@ from main_app.models import CustomUser
 
 
 DEFAULT_ACCOUNTS = (
-    ('mbangulap-admin', '1', 'SIMS', 'Administrator'),
-    ('mbangulap-teacher', '3', 'SIMS', 'Teacher'),
-    ('mbangulap', '2', 'SIMS', 'Learner'),
+    ('1', 'SIMS', 'Administrator'),
+    ('3', 'SIMS', 'Teacher'),
+    ('2', 'SIMS', 'Learner'),
 )
 
 
@@ -48,14 +48,18 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        usernames = [entry[0] for entry in DEFAULT_ACCOUNTS]
-        conflicts = list(
-            CustomUser.objects.filter(username__in=usernames)
-            .values_list('username', flat=True)
-        )
+        conflicts = [
+            f'{first_name} {last_name}'
+            for role, first_name, last_name in DEFAULT_ACCOUNTS
+            if CustomUser.objects.filter(
+                user_type=role,
+                first_name=first_name,
+                last_name=last_name,
+            ).exists()
+        ]
         if conflicts:
             raise CommandError(
-                'Starter accounts already exist or usernames are in use: '
+                'Starter accounts already exist: '
                 + ', '.join(conflicts)
                 + '. No accounts were changed.'
             )
@@ -79,10 +83,10 @@ class Command(BaseCommand):
                 raise CommandError(str(error)) from error
 
         credentials = {}
+        account_ids = {}
         with transaction.atomic():
-            for username, role, first_name, last_name in DEFAULT_ACCOUNTS:
+            for role, first_name, last_name in DEFAULT_ACCOUNTS:
                 account = CustomUser.objects.create_user(
-                    username=username,
                     password=(
                         learner_password if role == '2'
                         else secrets.token_urlsafe(32)
@@ -94,6 +98,7 @@ class Command(BaseCommand):
                     gender='M',
                     address='',
                 )
+                account_ids[role] = account.username
                 if role == '1':
                     credentials['Administrator'] = issue_pin(
                         account, pin=admin_pin)
@@ -112,10 +117,10 @@ class Command(BaseCommand):
             '2': 'Learner',
             '3': 'Teacher',
         }
-        for username, role, _first_name, _last_name in DEFAULT_ACCOUNTS:
+        for role, _first_name, _last_name in DEFAULT_ACCOUNTS:
             role_label = role_labels[role]
             self.stdout.write(
-                f'{role_label}: username={username}, '
+                f'{role_label}: account_id={account_ids[role]}, '
                 f'{"PIN" if role in ("1", "3") else "password"}='
                 f'{credentials[role_label]}'
             )

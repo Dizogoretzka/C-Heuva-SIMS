@@ -1,19 +1,34 @@
+import base64
 import csv
 from io import BytesIO, StringIO
 from zipfile import BadZipFile
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.utils.crypto import salted_hmac
+from .class_parser import (
+    ClassLabelError,
+    format_class_label,
+    parse_class_label,
+)
+from .account_ids import generate_account_id
+from .models import CustomUser
 
-from .forms import validate_unique_username
-from .models import Course
 
-
-IMPORT_HEADERS = ('first_name', 'last_name', 'username', 'gender', 'course')
+IMPORT_HEADERS = ('first_name', 'last_name', 'gender', 'class')
+LEARNER_IMPORT_CHUNK_SIZE = 10
 
 
 class LearnerImportError(ValueError):
     pass
+
+
+def learner_import_password(batch_token, row_index):
+    digest = salted_hmac(
+        'main_app.learner_import_password',
+        f'{batch_token}:{row_index}',
+        algorithm='sha256',
+    ).digest()
+    return base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
 
 
 def parse_learner_upload(uploaded_file):
@@ -100,7 +115,8 @@ def parse_learner_upload(uploaded_file):
 
 
 def validate_learner_rows(candidate_rows):
-    seen_usernames = set()
+    reserved_ids = set(
+        CustomUser.objects.values_list('username', flat=True))
     validated_rows = []
     for candidate in candidate_rows:
         data = dict(candidate.get('data', {}))
@@ -113,35 +129,30 @@ def validate_learner_rows(candidate_rows):
                     f'{field.replace("_", " ").title()} must be 150 '
                     'characters or fewer.')
 
-        username = data.get('username', '')
-        if username:
+        account_id = ''
+        if data.get('first_name') and data.get('last_name'):
             try:
-                username = validate_unique_username(username)
-            except ValidationError as error:
-                errors.extend(error.messages)
-            key = username.casefold()
-            if key in seen_usernames:
-                errors.append('Username is duplicated in this file.')
-            seen_usernames.add(key)
-        else:
-            errors.append('Username is required.')
+                account_id = generate_account_id(
+                    data['first_name'], data['last_name'], reserved_ids)
+                reserved_ids.add(account_id)
+            except ValueError as error:
+                errors.append(str(error))
 
         gender = data.get('gender', '').strip().upper()
         if gender not in ('M', 'F'):
             errors.append('Gender must be M or F.')
 
-        course = None
-        course_name = data.get('course', '')
-        if course_name:
-            course = Course.objects.filter(
-                name__iexact=course_name).order_by('pk').first()
-            if course is None:
-                errors.append(f'Course / grade "{course_name}" does not exist.')
+        class_label = data.get('class', '')
+        try:
+            parsed_class = parse_class_label(class_label)
+        except ClassLabelError as error:
+            errors.append(str(error))
+            parsed_class = None
 
-        data['username'] = username
+        data['account_id'] = account_id
         data['gender'] = gender
-        data['course_id'] = course.pk if course else None
-        data['course_name'] = course.name if course else ''
+        data['class_name'] = (
+            format_class_label(*parsed_class) if parsed_class else '')
         validated_rows.append({
             'line': candidate['line'],
             'data': data,

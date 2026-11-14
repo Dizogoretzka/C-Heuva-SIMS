@@ -11,6 +11,12 @@
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">{{page_title}}</h3>
+                        <button type="button" class="btn btn-warning float-right"
+                                id="notify-all"
+                                data-toggle="modal" data-target="#myModal"
+                                data-recipient-count="{{ students|length }}">
+                            Notify all learners ({{ students|length }})
+                        </button>
                     </div>
                     <!-- /.card-header -->
                     <div class="card-body">
@@ -20,7 +26,7 @@
                                 <tr>
                                     <th>SN</th>
                                     <th>Full Name</th>
-                                    <th>Username</th>
+                                    <th>Account ID</th>
                                     <th>Gender</th>
                                     <th>Avatar</th>
                                     <th>Action</th>
@@ -100,7 +106,15 @@
       $(".send_notification").click(function(){
           var id = $("#student_id").val()
           var message = $("#message").val()
+          if (id === "all" && !window.confirm(
+              "Send this notification to " +
+              $("#notify-all").data("recipient-count") + " learners?")) {
+              return;
+          }
           sendNotification(id,message);
+      })
+      $("#notify-all").click(function(){
+          $("#student_id").val("all");
       })
     function sendNotification(id,message){
         $.ajax({
@@ -114,7 +128,10 @@
            
                 
             if (response == 'True'){
-                alert("Notification Sent");
+                alert("Notification recorded for the selected learners.");
+                location.reload();
+            }else if (response == 'Partial'){
+                alert("Some push notifications could not be delivered. The in-app notifications were saved.");
                 location.reload();
               }else{
                 alert("Notification could not be saved. Please try again.");

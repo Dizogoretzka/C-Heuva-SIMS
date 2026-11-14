@@ -5,9 +5,12 @@
     <div class="container-fluid">
         <div class="row">
             <div class="col-md-12">
+                <div class="alert alert-info" role="status">
+                    Teacher connection: {{ relationship_status }}
+                </div>
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title">Subjects provided by your administrator</h3>
+                        <h3 class="card-title">Subjects for your class</h3>
                     </div>
                     <div class="card-body">
                         {% include "main_app/search_bar.html" with search_target="learner-subject-list" search_placeholder="Search subjects..." %}
@@ -29,8 +32,7 @@
                                 No subjects match your search.
                             </div>
                             <p class="text-muted mb-0">
-                                No subjects have been added by the administrator yet.
-                                Please contact an administrator.
+                                No subjects are available from your accepted teachers yet.
                             </p>
                         {% endif %}
                     </div>

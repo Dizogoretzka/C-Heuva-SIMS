@@ -14,19 +14,21 @@ from django.dispatch import receiver
 
 from .models import (
     ActivityLog,
-    Attendance,
-    AttendanceReport,
-    Course,
+    Assessment,
+    AssessmentPlan,
     CustomUser,
     FeedbackStudent,
-    GradeBand,
+    LearnerTeacherRequest,
     LeaveReportStudent,
     NotificationStudent,
     AcademicPeriod,
+    ReportCardPublication,
+    SchoolClass,
     Student,
     StudentResult,
     Subject,
     Teacher,
+    TeacherClassSetup,
 )
 
 
@@ -42,17 +44,28 @@ _TRACKED_MODELS = (
     CustomUser,
     Teacher,
     Student,
+    LearnerTeacherRequest,
+    TeacherClassSetup,
     Subject,
     StudentResult,
-    Attendance,
-    AttendanceReport,
-    Course,
+    ReportCardPublication,
+    AssessmentPlan,
+    Assessment,
+    SchoolClass,
     AcademicPeriod,
-    GradeBand,
     LeaveReportStudent,
     FeedbackStudent,
     NotificationStudent,
 )
+
+
+def _is_sensitive_field(field_name):
+    normalized_name = field_name.lower()
+    return normalized_name in _SENSITIVE_FIELDS or any(
+        sensitive_part in normalized_name
+        for sensitive_part in (
+            'password', 'pin', 'hash', 'secret', 'token')
+    )
 
 
 def set_current_request(request):
@@ -77,12 +90,19 @@ def _json_value(value):
         return value
     if isinstance(value, (date, datetime, Decimal)):
         return str(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
     return str(value)
 
 
 def _field_value(instance, field):
     value = getattr(instance, field.attname)
-    if field.name in _SENSITIVE_FIELDS:
+    if _is_sensitive_field(field.name):
         return '[redacted]'
     if field.is_relation:
         if value is None:

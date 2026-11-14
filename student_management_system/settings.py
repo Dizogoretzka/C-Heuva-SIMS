@@ -48,6 +48,11 @@ SECURE_SSL_REDIRECT = not DEBUG
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
+# The cookie outlives the inactivity window so an expired session can show
+# the re-login message instead of appearing to vanish without explanation.
+SESSION_COOKIE_AGE = 24 * 60 * 60
+SESSION_SAVE_EVERY_REQUEST = True
+SIMS_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
 
 
 # Application definition
@@ -76,6 +81,7 @@ MIDDLEWARE = [
 
     # My Middleware
     'main_app.middleware.ActivityRequestMiddleware',
+    'main_app.middleware.SessionInactivityMiddleware',
     'main_app.middleware.LoginCheckMiddleWare',
 ]
 
@@ -93,6 +99,8 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'main_app.context_processors.current_academic_period',
+                'main_app.context_processors.pending_teacher_request_count',
+                'main_app.context_processors.active_sidebar_item',
             ],
         },
     },
@@ -142,13 +150,12 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Africa/Windhoek'
 
 USE_I18N = True
 
 USE_TZ = True
 
-SIMS_MAX_TOTAL_SCORE = int(os.environ.get('SIMS_MAX_TOTAL_SCORE', '100'))
 SIMS_LEARNER_IMPORT_MAX_BYTES = int(
     os.environ.get('SIMS_LEARNER_IMPORT_MAX_BYTES', str(2 * 1024 * 1024)))
 SIMS_LEARNER_IMPORT_MAX_ROWS = int(
@@ -182,8 +189,6 @@ SIMS_LOGIN_IP_WINDOW_SECONDS = int(
     os.environ.get('SIMS_LOGIN_IP_WINDOW_SECONDS', '900'))
 SIMS_ACTIVITY_LOG_RETENTION_DAYS = int(
     os.environ.get('SIMS_ACTIVITY_LOG_RETENTION_DAYS', '365'))
-TIME_ZONE = 'Africa/Lagos'
-
 STORAGES = {
     'default': {
         'BACKEND': 'django.core.files.storage.FileSystemStorage',

@@ -1,0 +1,87 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">{{ page_title }}</h3>
+            </div>
+            <div class="card-body">
+                <form method="get" class="form-row align-items-end mb-3">
+                    <div class="form-group col-md-5">
+                        <label for="recycle-search">Search deleted items</label>
+                        <input id="recycle-search" name="search" type="search"
+                               class="form-control" value="{{ search_query }}">
+                    </div>
+                    <div class="form-group col-md-4">
+                        <label for="recycle-type">Record type</label>
+                        <select id="recycle-type" name="type" class="form-control">
+                            <option value="">All types</option>
+                            {% for value, label in record_types %}
+                            <option value="{{ value }}"
+                                    {% if selected_type == value %}selected{% endif %}>
+                                {{ label }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group col-md-3">
+                        <button class="btn btn-primary" type="submit">Search</button>
+                        <a class="btn btn-light" href="{% url 'recycle_bin' %}">Clear</a>
+                    </div>
+                </form>
+
+                <div class="table-responsive">
+                    <table class="table table-bordered table-hover">
+                        <thead>
+                            <tr>
+                                <th>Deleted item</th>
+                                <th>Type</th>
+                                <th>Records</th>
+                                <th>Deleted</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for entry in entries %}
+                            <tr>
+                                <td>{{ entry.record_label }}</td>
+                                <td>{{ entry.record_type|title }}</td>
+                                <td>{{ entry.object_count }}</td>
+                                <td>{{ entry.deleted_at }}</td>
+                                <td class="text-nowrap">
+                                    <form method="post"
+                                          action="{% url 'restore_recycle_bin_entry' entry.pk %}"
+                                          class="d-inline">
+                                        {% csrf_token %}
+                                        <button class="btn btn-sm btn-success" type="submit">
+                                            Restore
+                                        </button>
+                                    </form>
+                                    <form method="post"
+                                          action="{% url 'permanently_delete_recycle_bin_entry' entry.pk %}"
+                                          class="d-inline"
+                                          onsubmit="return confirm('Permanently delete this recycle-bin item? This cannot be undone.');">
+                                        {% csrf_token %}
+                                        <button class="btn btn-sm btn-danger" type="submit">
+                                            Delete forever
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="5" class="text-center text-muted">
+                                    No deleted items match these filters.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

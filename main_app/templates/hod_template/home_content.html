@@ -27,8 +27,8 @@
                     <div class="icon">
                         <i class="fas fa-book"></i>
                     </div>
-                    <a href="{% url 'manage_subject' %}" class="small-box-footer">
-                        {% if is_teacher %}View subjects{% else %}Manage subjects{% endif %}
+                    <a href="{% if is_teacher %}{% url 'teacher_classes_subjects' %}{% else %}{% url 'manage_assignments' %}{% endif %}" class="small-box-footer">
+                        {% if is_teacher %}My classes and subjects{% else %}View assignments{% endif %}
                         <i class="fas fa-arrow-circle-right"></i>
                     </a>
                 </div>
@@ -43,8 +43,8 @@
                     <div class="icon">
                         <i class="fas fa-sign-in-alt"></i>
                     </div>
-                    <a href="{% url 'learner_login_activity' %}" class="small-box-footer">
-                        View login activity <i class="fas fa-arrow-circle-right"></i>
+                    <a href="{% url 'activity_log' %}?role=2&amp;action=sign_in" class="small-box-footer">
+                        View learner sign-ins <i class="fas fa-arrow-circle-right"></i>
                     </a>
                 </div>
             </div>
@@ -65,22 +65,9 @@
         </div>
         {% if is_teacher %}
         <div class="row">
-            <div class="col-lg-6 col-12">
-                <div class="info-box">
-                    <span class="info-box-icon bg-primary"><i class="fas fa-file-alt"></i></span>
-                    <div class="info-box-content">
-                        <span class="info-box-text">Attendance</span>
-                        <span class="info-box-number">Take or correct class attendance</span>
-                        <a href="{% url 'teacher_attendance' %}">Open attendance</a>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="row">
             <div class="col-12">
                 <a class="btn btn-primary mr-2" href="{% url 'generate_report_card' %}">Generate report card</a>
-                <a class="btn btn-outline-primary" href="{% url 'generate_report' %}">Generate class, results, or attendance report</a>
-                <a class="btn btn-outline-secondary" href="{% url 'manage_assessment_weights' %}">Configure assessment weights</a>
+                <a class="btn btn-outline-primary" href="{% url 'generate_report' %}">Generate class or results report</a>
             </div>
         </div>
         {% else %}
@@ -95,8 +82,8 @@
                             <thead>
                                 <tr>
                                     <th>Learner</th>
-                                    <th>Username</th>
-                                    <th>Course / grade</th>
+                                    <th>Account ID</th>
+                                    <th>Class</th>
                                     <th>Date and time</th>
                                 </tr>
                             </thead>
@@ -105,7 +92,7 @@
                                 <tr>
                                     <td>{{ activity.student.admin.get_full_name|default:activity.student.admin.username }}</td>
                                     <td>{{ activity.student.admin.username }}</td>
-                                    <td>{{ activity.student.course|default:"Not assigned" }}</td>
+                                    <td>{{ activity.student.school_class|default:"Not assigned" }}</td>
                                     <td>{{ activity.logged_in_at|date:"M j, Y, P" }}</td>
                                 </tr>
                                 {% empty %}

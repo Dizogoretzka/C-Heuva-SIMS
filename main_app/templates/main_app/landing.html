@@ -1,7 +1,6 @@
 {% load static %}
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
@@ -12,94 +11,229 @@
     <link rel="stylesheet" href="{% static 'plugins/icheck-bootstrap/icheck-bootstrap.min.css' %}">
     <link rel="stylesheet" href="{% static 'dist/css/adminlte.min.css' %}">
     <link rel="stylesheet" href="{% static 'main_app/css/branding.css' %}?v=5">
-    <style>
-        body.login-page {
-            min-height: 100vh;
-            padding: 2rem 1rem;
-        }
-
-        .role-picker {
-            width: min(100%, 960px);
-        }
-
-        .role-picker .login-logo {
-            white-space: normal;
-        }
-
-        .role-picker .card-body {
-            padding: 1.5rem;
-        }
-
-        .role-options {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 1.25rem;
-        }
-
-        .role-option {
-            min-height: 190px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 0.85rem;
-            padding: 1.25rem;
-            border-radius: 0.5rem;
-            font-size: 1.2rem;
-            font-weight: 600;
-            box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.12);
-            transition: transform 150ms ease, box-shadow 150ms ease;
-        }
-
-        .role-option:hover,
-        .role-option:focus {
-            transform: translateY(-3px);
-            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.18);
-        }
-
-        .role-option i {
-            font-size: 2.5rem;
-        }
-
-        @media (max-width: 575.98px) {
-            .role-options {
-                grid-template-columns: 1fr;
-            }
-
-            .role-option {
-                min-height: 125px;
-            }
-        }
-    </style>
+    <link rel="stylesheet" href="{% static 'main_app/css/landing.css' %}">
+    <script src="{% static 'main_app/js/landing.js' %}" defer></script>
 </head>
-
-<body class="hold-transition login-page">
+<body class="hold-transition login-page sims-login-page">
     {% include "main_app/page_loader.html" %}
-    <div class="role-picker">
-        <div class="login-logo">
-            {% include "main_app/crest_logo.html" with crest_class="landing-crest" crest_width="120" crest_height="133" %}
-            <b>C. Heuva Junior Secondary School Information System</b>
-        </div>
-        <div class="card">
-            <div class="card-body login-card-body">
-                <p class="login-box-msg">Choose how you want to continue</p>
-                <div class="role-options">
-                    <a href="{% url 'role_login' 'admin' %}" class="btn btn-primary role-option">
-                        <i class="fas fa-user-shield" aria-hidden="true"></i>
-                        <span>Administrator</span>
-                    </a>
-                    <a href="{% url 'role_login' 'teacher' %}" class="btn btn-info role-option">
-                        <i class="fas fa-chalkboard-teacher" aria-hidden="true"></i>
-                        <span>Teacher</span>
-                    </a>
-                    <a href="{% url 'role_login' 'learner' %}" class="btn btn-success role-option">
-                        <i class="fas fa-user-graduate" aria-hidden="true"></i>
-                        <span>Learner</span>
-                    </a>
-                </div>
-            </div>
-        </div>
-    </div>
-</body>
 
+    <header class="sims-topbar">
+        <span>C. Heuva Junior Secondary School</span>
+        <time datetime="{{ today|date:'Y-m-d' }}">{{ today|date:'l, j F Y' }}</time>
+    </header>
+
+    {% if messages %}
+    <div class="container mt-3" role="status">
+        {% for message in messages %}
+        <div class="alert alert-info mb-2">{{ message }}</div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <main class="sims-login-shell" data-role-switcher
+          data-initial-role="{{ selected_role }}">
+        <div class="sims-brand">
+            {% include "main_app/crest_logo.html" with crest_class="sims-brand__crest" crest_width="72" crest_height="80" %}
+            <h1>C. Heuva Junior Secondary School Information System</h1>
+        </div>
+
+        <div class="sims-card-grid">
+            <section class="sims-card sims-info-card" aria-live="polite">
+                <header class="sims-card__header sims-card__header--green">
+                    <h2 data-role-heading>{{ selected_role|title }}</h2>
+                </header>
+                <div class="sims-card__body">
+                    <div class="sims-role-panel" data-role-panel="admin"
+                         data-role-info>
+                        <p>Sign in as Administrator</p>
+                        <p>Choose a different interface</p>
+                        <p>Forgot your password or PIN? Ask your teacher or administrator to reset it.</p>
+                    </div>
+                    <div class="sims-role-panel" data-role-panel="teacher"
+                         data-role-info>
+                        <p>Sign in as Teacher</p>
+                        <p>Choose a different interface</p>
+                        <p>Forgot your password or PIN? Ask your teacher or administrator to reset it.</p>
+                    </div>
+                    <div class="sims-role-panel" data-role-panel="learner"
+                         data-role-info>
+                        <p>Choose how you want to continue</p>
+                        <p>Sign in as Learner</p>
+                        <p>Forgot your password? Ask your teacher or administrator to reset it.</p>
+                        <p class="sims-register-link">
+                            <a href="{% url 'register_learner' %}">Don't have an account? Register</a>
+                        </p>
+                    </div>
+                    <div class="sims-role-panel" data-role-panel="fallback"
+                         data-role-info>
+                        <p>C. Heuva Junior Secondary School Information System</p>
+                        <p>Choose how you want to continue</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="sims-card sims-signin-card" aria-labelledby="signin-title">
+                <header class="sims-card__header sims-card__header--yellow">
+                    <h2 id="signin-title">Sign in</h2>
+                </header>
+                <div class="sims-card__body">
+                    <fieldset class="sims-role-picker">
+                        <legend>Choose a role</legend>
+                        <div class="sims-role-picker__options">
+                            <label for="role-admin">
+                                <input id="role-admin" type="radio" name="selected_role"
+                                       value="admin" {% if selected_role == 'admin' %}checked{% endif %}>
+                                Administrator
+                            </label>
+                            <label for="role-teacher">
+                                <input id="role-teacher" type="radio" name="selected_role"
+                                       value="teacher" {% if selected_role == 'teacher' %}checked{% endif %}>
+                                Teacher
+                            </label>
+                            <label for="role-learner">
+                                <input id="role-learner" type="radio" name="selected_role"
+                                       value="learner" {% if selected_role == 'learner' %}checked{% endif %}>
+                                Learner
+                            </label>
+                        </div>
+                    </fieldset>
+
+                    <div class="sims-role-panel" data-role-panel="admin">
+                        <form action="{% url 'user_login' %}" method="post"
+                              data-role-form="admin">
+                            {% csrf_token %}
+                            <input type="hidden" name="role" value="admin">
+                            <div class="form-group">
+                                <label for="admin-account-id">Account ID</label>
+                                <input id="admin-account-id" class="form-control"
+                                       type="text" name="account_id" required
+                                       autocomplete="username"
+                                       value="{% if selected_role == 'admin' %}{{ login_account_id }}{% endif %}">
+                            </div>
+                            <div class="form-group">
+                                <label for="admin-pin">PIN</label>
+                                <div class="input-group">
+                                    <input id="admin-pin" class="form-control"
+                                           type="password" name="pin" required
+                                           inputmode="numeric" pattern="[0-9]+"
+                                           maxlength="{{ pin_length }}" autocomplete="off"
+                                           aria-describedby="admin-pin-hint">
+                                    <div class="input-group-append">
+                                        <button class="btn btn-outline-secondary"
+                                                type="button" data-toggle-pin
+                                                aria-controls="admin-pin"
+                                                aria-label="Show PIN">
+                                            <span class="fas fa-eye" aria-hidden="true"></span>
+                                        </button>
+                                    </div>
+                                </div>
+                                <small id="admin-pin-hint" class="form-text text-muted">
+                                    {{ pin_length }} numeric digits
+                                </small>
+                            </div>
+                            <button class="btn btn-primary sims-login-button"
+                                    type="submit">Login</button>
+                            {% if selected_role == 'admin' %}
+                                {% for message in messages %}
+                                <div class="sims-message {% if message.tags == 'error' %}sims-message--error{% endif %}"
+                                     role="{% if message.tags == 'error' %}alert{% else %}status{% endif %}">
+                                    {{ message }}
+                                </div>
+                                {% endfor %}
+                            {% endif %}
+                        </form>
+                    </div>
+
+                    <div class="sims-role-panel" data-role-panel="teacher">
+                        <form action="{% url 'user_login' %}" method="post"
+                              data-role-form="teacher">
+                            {% csrf_token %}
+                            <input type="hidden" name="role" value="teacher">
+                            <div class="form-group">
+                                <label for="teacher-account-id">Account ID</label>
+                                <input id="teacher-account-id" class="form-control"
+                                       type="text" name="account_id" required
+                                       autocomplete="username"
+                                       value="{% if selected_role == 'teacher' %}{{ login_account_id }}{% endif %}">
+                            </div>
+                            <div class="form-group">
+                                <label for="teacher-pin">PIN</label>
+                                <div class="input-group">
+                                    <input id="teacher-pin" class="form-control"
+                                           type="password" name="pin" required
+                                           inputmode="numeric" pattern="[0-9]+"
+                                           maxlength="{{ pin_length }}" autocomplete="off"
+                                           aria-describedby="teacher-pin-hint">
+                                    <div class="input-group-append">
+                                        <button class="btn btn-outline-secondary"
+                                                type="button" data-toggle-pin
+                                                aria-controls="teacher-pin"
+                                                aria-label="Show PIN">
+                                            <span class="fas fa-eye" aria-hidden="true"></span>
+                                        </button>
+                                    </div>
+                                </div>
+                                <small id="teacher-pin-hint" class="form-text text-muted">
+                                    {{ pin_length }} numeric digits
+                                </small>
+                            </div>
+                            <button class="btn btn-primary sims-login-button"
+                                    type="submit">Login</button>
+                            {% if selected_role == 'teacher' %}
+                                {% for message in messages %}
+                                <div class="sims-message {% if message.tags == 'error' %}sims-message--error{% endif %}"
+                                     role="{% if message.tags == 'error' %}alert{% else %}status{% endif %}">
+                                    {{ message }}
+                                </div>
+                                {% endfor %}
+                            {% endif %}
+                        </form>
+                    </div>
+
+                    <div class="sims-role-panel" data-role-panel="learner">
+                        <form action="{% url 'user_login' %}" method="post"
+                              data-role-form="learner">
+                            {% csrf_token %}
+                            <input type="hidden" name="role" value="learner">
+                            <div class="form-group">
+                                <label for="learner-account-id">Account ID</label>
+                                <input id="learner-account-id" class="form-control"
+                                       type="text" name="account_id" required
+                                       autocomplete="username"
+                                       value="{% if selected_role == 'learner' %}{{ login_account_id }}{% endif %}">
+                            </div>
+                            <div class="form-group">
+                                <label for="learner-password">Password</label>
+                                <input id="learner-password" class="form-control"
+                                       type="password" name="password" required
+                                       autocomplete="current-password">
+                            </div>
+                            <button class="btn btn-primary sims-login-button"
+                                    type="submit">Login</button>
+                            {% if selected_role == 'learner' %}
+                                {% for message in messages %}
+                                <div class="sims-message {% if message.tags == 'error' %}sims-message--error{% endif %}"
+                                     role="{% if message.tags == 'error' %}alert{% else %}status{% endif %}">
+                                    {{ message }}
+                                </div>
+                                {% endfor %}
+                            {% endif %}
+                        </form>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <noscript>
+            <nav class="sims-no-script" aria-label="Sign-in pages">
+                <p>Choose a sign-in page:</p>
+                <a href="{% url 'role_login' 'admin' %}">Administrator</a>
+                <a href="{% url 'role_login' 'teacher' %}">Teacher</a>
+                <a href="{% url 'role_login' 'learner' %}">Learner</a>
+            </nav>
+        </noscript>
+
+        <footer class="sims-footer-rule"></footer>
+    </main>
+</body>
 </html>

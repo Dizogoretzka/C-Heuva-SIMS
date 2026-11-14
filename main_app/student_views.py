@@ -2,8 +2,9 @@ import json
 
 from django.contrib import messages
 from django.contrib.auth import update_session_auth_hash
+from django.contrib.auth.decorators import login_required
 from django.core.files.storage import FileSystemStorage
-from django.db.models import Q
+from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -11,37 +12,68 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .forms import *
 from .grading import (
-    calculate_final_mark,
-    get_assessment_weights,
-    get_grade_band,
-    get_test_scores,
-    get_test_weights,
+    prepare_result,
 )
 from .models import *
+from .models import school_class_from_label
 from .views import render_pin_confirmation, update_profile_from_form
+from .teacher_requests import create_class_requests, reset_class_requests
+
+
+def _learner_relationships(student):
+    requests = list(
+        student.teacher_requests.select_related(
+            'teacher__teacher', 'school_class').order_by('teacher__teacher__last_name')
+    )
+    accepted = [
+        item for item in requests
+        if item.status == LearnerTeacherRequest.ACCEPTED
+    ]
+    if accepted:
+        names = [
+            item.teacher.teacher.get_full_name().strip()
+            or item.teacher.teacher.get_username()
+            or 'Teacher'
+            for item in accepted
+        ]
+        status = f'Accepted by {", ".join(names)}'
+    elif any(
+        item.status == LearnerTeacherRequest.PENDING for item in requests
+    ) or not requests or all(
+        item.status == LearnerTeacherRequest.CANCELLED for item in requests
+    ):
+        status = 'Waiting for a teacher'
+    else:
+        status = 'Not accepted'
+    return requests, accepted, status
+
+
+def _learner_subjects(student, accepted_requests):
+    teacher_ids = [item.teacher_id for item in accepted_requests]
+    return Subject.objects.filter(
+        school_class_id=student.school_class_id,
+        teacher_id__in=teacher_ids,
+    )
 
 
 def student_home(request):
     student = get_object_or_404(Student, admin=request.user)
-    available_subjects = Subject.objects.filter(
-        Q(course__isnull=True) | Q(course_id=student.course_id)
-    ).filter(
-        Q(teacher__isnull=True) | Q(teacher=student.teacher)
+    _, accepted_requests, relationship_status = _learner_relationships(student)
+    available_subjects = _learner_subjects(student, accepted_requests)
+    available_results = StudentResult.objects.filter(
+        student=student,
+        subject__in=available_subjects,
     )
     report_card_available = bool(
         student.academic_period
-        and StudentResult.objects.filter(
-            student=student,
-        ).filter(
-            Q(academic_period=student.academic_period)
-            | Q(academic_period__isnull=True)
-        ).exists()
+        and available_results.filter(
+            academic_period=student.academic_period).exists()
     )
     context = {
         'total_subject': available_subjects.count(),
-        'student_result_count': StudentResult.objects.filter(
-            student=student).count(),
+        'student_result_count': available_results.count(),
         'report_card_available': report_card_available,
+        'relationship_status': relationship_status,
         'page_title': 'Learner Homepage'
     }
     return render(request, 'student_template/home_content.html', context)
@@ -49,13 +81,12 @@ def student_home(request):
 
 def student_view_subjects(request):
     student = get_object_or_404(Student, admin=request.user)
-    subjects = Subject.objects.filter(
-        Q(course__isnull=True) | Q(course_id=student.course_id)
-    ).filter(
-        Q(teacher__isnull=True) | Q(teacher=student.teacher)
-    ).order_by('name')
+    _, accepted_requests, relationship_status = _learner_relationships(student)
+    subjects = _learner_subjects(student, accepted_requests).select_related(
+        'teacher__teacher').order_by('name')
     context = {
         'subjects': subjects,
+        'relationship_status': relationship_status,
         'page_title': 'My Subjects',
     }
     return render(request, 'student_template/student_view_subjects.html', context)
@@ -117,6 +148,7 @@ def student_view_profile(request):
         request.POST or None,
         request.FILES or None,
         user=custom_user,
+        student=student,
     )
     context = {'form': form,
                'page_title': 'My Profile',
@@ -124,8 +156,19 @@ def student_view_profile(request):
                'student': student,
                }
     if request.method == 'POST' and form.is_valid():
-        new_password, issued_pin = update_profile_from_form(
-            custom_user, form)
+        with transaction.atomic():
+            new_password, issued_pin = update_profile_from_form(
+                custom_user, form)
+            new_school_class = school_class_from_label(
+                form.cleaned_data['grade_and_class'])
+            class_changed = student.school_class_id != getattr(
+                new_school_class, 'pk', None)
+            if class_changed:
+                reset_class_requests(student)
+            student.school_class = new_school_class
+            student.save(update_fields=['school_class', 'updated_at'])
+            if class_changed:
+                create_class_requests(student)
         if new_password:
             update_session_auth_hash(request, custom_user)
         if issued_pin:
@@ -167,36 +210,24 @@ def student_view_notification(request):
 
 def student_view_result(request):
     student = get_object_or_404(Student, admin=request.user)
+    _, accepted_requests, relationship_status = _learner_relationships(student)
+    available_subjects = _learner_subjects(student, accepted_requests)
     results = list(StudentResult.objects.filter(
-        student=student).select_related(
+        student=student,
+        subject__in=available_subjects,
+    ).select_related(
             'subject', 'academic_period', 'student__academic_period'))
-    grade_bands = list(GradeBand.objects.order_by('minimum_score'))
     for result in results:
-        result.assessment_weights = get_assessment_weights(
-            result.subject,
-            result.academic_period or student.academic_period,
-        )
-        result.total_score = calculate_final_mark(
-            result, result.assessment_weights)
-        result.grade_band = get_grade_band(result.total_score, grade_bands)
-        result.grade_symbol = (
-            result.grade_band.symbol
-            if isinstance(result.grade_band, GradeBand)
-            else result.grade_band
-        )
-        test_weights = get_test_weights(result.assessment_weights) or [
-            (f'Test {number}', None) for number in range(1, 6)
-        ]
-        test_scores = get_test_scores(result, result.assessment_weights)
-        result.test_assessment_values = [
-            (name, score)
-            for (name, _), score in zip(test_weights, test_scores)
-        ]
+        prepare_result(result)
     has_report_card = bool(student.academic_period and results)
     context = {
         'results': results,
         'student': student,
+        'relationship_status': relationship_status,
         'has_report_card': has_report_card,
+        'assigned_report_cards': ReportCardPublication.objects.filter(
+            student=student).select_related(
+                'teacher__teacher', 'academic_period'),
         'page_title': "View Results"
     }
     return render(request, "student_template/student_view_result.html", context)
@@ -226,21 +257,34 @@ def student_report_card(request):
     return response
 
 
-def student_attendance(request):
-    student = get_object_or_404(Student, admin=request.user)
-    records = AttendanceReport.objects.filter(
-        student=student).select_related(
-            'attendance__course',
-            'attendance__subject',
-            'attendance__academic_period',
-        ).order_by('-attendance__date')
-    total = records.count()
-    present = records.filter(status=True).count()
-    context = {
-        'records': records,
-        'total_marked': total,
-        'present_count': present,
-        'attendance_percentage': (present / total * 100) if total else 0,
-        'page_title': 'My Attendance',
-    }
-    return render(request, 'student_template/student_attendance.html', context)
+@login_required
+def student_published_report_card(request, publication_id):
+    if request.user.user_type != '2':
+        return redirect(reverse('login_page'))
+    publication = get_object_or_404(
+        ReportCardPublication.objects.select_related(
+            'teacher__teacher', 'student__admin', 'academic_period'),
+        pk=publication_id,
+        student__admin=request.user,
+    )
+    export_format = request.GET.get('export', 'pdf')
+    if export_format not in ('pdf', 'csv'):
+        return HttpResponse('Unsupported export format.', status=400)
+
+    from .hod_views import _report_card_pdf
+
+    response = _report_card_pdf(
+        request,
+        publication.teacher.teacher,
+        publication.student,
+        publication.academic_period,
+        export_format=export_format,
+        actor_user=request.user,
+    )
+    if response is None:
+        messages.warning(
+            request, 'The published report card no longer has reportable results.')
+        return redirect(reverse('student_view_result'))
+    return response
+
+

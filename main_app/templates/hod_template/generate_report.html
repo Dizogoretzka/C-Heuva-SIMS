@@ -20,10 +20,10 @@
                                 {{ form.report_type }}
                                 {{ form.report_type.errors }}
                             </div>
-                            <div class="form-group report-filter" id="course-field">
-                                <label for="{{ form.course.id_for_label }}">{{ form.course.label }}</label>
-                                {{ form.course }}
-                                {{ form.course.errors }}
+                            <div class="form-group report-filter" id="school-class-field">
+                                <label for="{{ form.school_class.id_for_label }}">{{ form.school_class.label }}</label>
+                                {{ form.school_class }}
+                                {{ form.school_class.errors }}
                             </div>
                             <div class="form-group report-filter" id="academic_period-field">
                                 <label for="{{ form.academic_period.id_for_label }}">{{ form.academic_period.label }}</label>
@@ -31,7 +31,7 @@
                                 {{ form.academic_period.errors }}
                             </div>
                             <div class="form-group report-filter" id="subject-field">
-                                <label for="{{ form.subject.id_for_label }}">{{ form.subject.label }} (optional)</label>
+                                <label for="{{ form.subject.id_for_label }}">{{ form.subject.label }}</label>
                                 {{ form.subject }}
                                 {{ form.subject.errors }}
                             </div>
@@ -48,65 +48,9 @@
                         </div>
                     </form>
                 </div>
-                {% if request.user.user_type == '3' %}
-                <button type="button" class="btn btn-outline-primary mb-3"
-                        id="grade-band-toggle"
-                        aria-expanded="{% if show_grade_band_form %}true{% else %}false{% endif %}"
-                        aria-controls="grade-band-panel">Grade Bands</button>
-                <div class="card card-warning" id="grade-band-panel"
-                     {% if not show_grade_band_form %}hidden{% endif %}>
-                    <div class="card-header">
-                        <h3 class="card-title">Set Grade Bands</h3>
-                    </div>
-                    <form method="post">
-                        {% csrf_token %}
-                        <input type="hidden" name="action" value="save_grade_bands">
-                        <div class="card-body">
-                            <p>Scores are out of {{ score_maximum }}.</p>
-                            {% if grade_band_gaps %}
-                            <div class="alert alert-warning">
-                                Uncovered score ranges:
-                                {% for start, end in grade_band_gaps %}
-                                {{ start }}-{{ end }}{% if not forloop.last %}, {% endif %}
-                                {% endfor %}. These gaps do not prevent saving.
-                            </div>
-                            {% endif %}
-                            {{ grade_band_formset.management_form }}
-                            {% if grade_band_formset.non_form_errors %}
-                            <div class="alert alert-danger">
-                                {{ grade_band_formset.non_form_errors }}
-                            </div>
-                            {% endif %}
-                            <div class="table-responsive">
-                                <table class="table table-bordered">
-                                    <thead><tr><th>From</th><th>To</th><th>Symbol</th></tr></thead>
-                                    <tbody>
-                                        {% for band_form in grade_band_formset %}
-                                        <tr>
-                                            {% for field in band_form %}
-                                            <td>
-                                                {{ field }}
-                                                {% for error in field.errors %}
-                                                <div class="text-danger">{{ error }}</div>
-                                                {% endfor %}
-                                            </td>
-                                            {% endfor %}
-                                        </tr>
-                                        {% endfor %}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                        <div class="card-footer">
-                            <button type="submit" class="btn btn-primary">Save Grade Bands</button>
-                        </div>
-                    </form>
-                </div>
-                {% endif %}
                 <p class="text-muted">
-                    Choose a course/grade and academic period for class, results,
-                    or attendance reports. Results and attendance can optionally
-                    be filtered to one subject.
+                    Choose a class and academic period for class or
+                    results mark sheets require one subject.
                 </p>
             </div>
         </div>
@@ -116,27 +60,17 @@
 {% block custom_js %}
 <script>
     (function () {
-        const gradeBandToggle = document.getElementById("grade-band-toggle");
-        const gradeBandPanel = document.getElementById("grade-band-panel");
-        if (gradeBandToggle && gradeBandPanel) {
-            gradeBandToggle.addEventListener("click", function () {
-                gradeBandPanel.hidden = !gradeBandPanel.hidden;
-                gradeBandToggle.setAttribute(
-                    "aria-expanded", String(!gradeBandPanel.hidden));
-            });
-        }
-
         const reportType = document.getElementById("id_report_type");
-        const courseField = document.getElementById("course-field");
+        const schoolClassField = document.getElementById("school-class-field");
         const periodField = document.getElementById("academic_period-field");
         const subjectField = document.getElementById("subject-field");
 
         function updateFilters() {
             const selectedType = reportType.value;
             const schoolSummary = selectedType === "school_summary";
-            courseField.hidden = schoolSummary;
+            schoolClassField.hidden = schoolSummary;
             periodField.hidden = schoolSummary;
-            subjectField.hidden = !["learner_results", "attendance_summary"].includes(selectedType);
+            subjectField.hidden = selectedType !== "learner_results";
         }
 
         reportType.addEventListener("change", updateFilters);

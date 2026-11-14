@@ -39,71 +39,77 @@
             <ul class="nav nav-pills nav-sidebar flex-column" data-widget="treeview"
                 role="menu" data-accordion="false">
                 {% if request.user.user_type == '1' %}
-                <li class="nav-item"><a href="{% url 'admin_home' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'admin_home' %}" class="nav-link {% if active_sidebar_item == 'home' %}active{% endif %}" {% if active_sidebar_item == 'home' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-home"></i><p>Home</p></a></li>
-                <li class="nav-item"><a href="{% url 'admin_view_profile' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'admin_view_profile' %}" class="nav-link {% if active_sidebar_item == 'profile' %}active{% endif %}" {% if active_sidebar_item == 'profile' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-user-edit"></i><p>My Profile</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_student' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'manage_admins' %}" class="nav-link {% if active_sidebar_item == 'admins' %}active{% endif %}" {% if active_sidebar_item == 'admins' %}aria-current="page"{% endif %}>
+                    <i class="nav-icon fas fa-user-shield"></i><p>Manage Administrators</p></a></li>
+                <li class="nav-item"><a href="{% url 'manage_student' %}" class="nav-link {% if active_sidebar_item == 'learners' %}active{% endif %}" {% if active_sidebar_item == 'learners' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-users"></i><p>Manage Learners</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_teachers' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'manage_teachers' %}" class="nav-link {% if active_sidebar_item == 'teachers' %}active{% endif %}" {% if active_sidebar_item == 'teachers' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-chalkboard-teacher"></i><p>Manage Teachers</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_assignments' %}" class="nav-link">
-                    <i class="nav-icon fas fa-user-tag"></i><p>Teacher Assignments</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_academic_periods' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'manage_assignments' %}" class="nav-link {% if active_sidebar_item == 'assignments' %}active{% endif %}" {% if active_sidebar_item == 'assignments' %}aria-current="page"{% endif %}>
+                    <i class="nav-icon fas fa-user-tag"></i><p>Assignments</p></a></li>
+                <li class="nav-item"><a href="{% url 'manage_academic_periods' %}" class="nav-link {% if active_sidebar_item == 'periods' %}active{% endif %}" {% if active_sidebar_item == 'periods' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-calendar-alt"></i><p>Academic Periods</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_subject' %}" class="nav-link">
-                    <i class="nav-icon fas fa-book-reader"></i><p>Manage Subjects</p></a></li>
-                <li class="nav-item"><a href="{% url 'learner_login_activity' %}" class="nav-link">
-                    <i class="nav-icon fas fa-sign-in-alt"></i><p>Learner Login Activity</p></a></li>
-                <li class="nav-item"><a href="{% url 'activity_log' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'school_profile' %}" class="nav-link {% if active_sidebar_item == 'school_profile' %}active{% endif %}" {% if active_sidebar_item == 'school_profile' %}aria-current="page"{% endif %}>
+                    <i class="nav-icon fas fa-school"></i><p>School Profile</p></a></li>
+                <li class="nav-item"><a href="{% url 'activity_log' %}" class="nav-link {% if active_sidebar_item == 'activity' %}active{% endif %}" {% if active_sidebar_item == 'activity' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-clipboard-list"></i><p>Activity Log</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_feedback_message' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_feedback_message' %}" class="nav-link {% if active_sidebar_item == 'feedback' %}active{% endif %}" {% if active_sidebar_item == 'feedback' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-comments"></i><p>Learner Feedback</p></a></li>
-                <li class="nav-item"><a href="{% url 'view_student_leave' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'view_student_leave' %}" class="nav-link {% if active_sidebar_item == 'leave' %}active{% endif %}" {% if active_sidebar_item == 'leave' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-calendar-minus"></i><p>Learner Leave</p></a></li>
-                <li class="nav-item"><a href="{% url 'admin_notify_student' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'admin_notify_student' %}" class="nav-link {% if active_sidebar_item == 'notifications' %}active{% endif %}" {% if active_sidebar_item == 'notifications' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-bell"></i><p>Notify Learners</p></a></li>
-                <li class="nav-item"><a href="{% url 'generate_report' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'generate_report' %}" class="nav-link {% if active_sidebar_item == 'reports' %}active{% endif %}" {% if active_sidebar_item == 'reports' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-file-pdf"></i><p>School Summary / Class List</p></a></li>
-                <li class="nav-item"><a href="{% url 'admin_attendance_records' %}" class="nav-link">
-                    <i class="nav-icon fas fa-calendar-check"></i><p>Attendance Records</p></a></li>
                 {% elif request.user.user_type == '3' %}
-                <li class="nav-item"><a href="{% url 'teacher_home' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'teacher_home' %}" class="nav-link {% if active_sidebar_item == 'home' %}active{% endif %}" {% if active_sidebar_item == 'home' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-home"></i><p>Home</p></a></li>
-                <li class="nav-item"><a href="{% url 'teacher_profile' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'teacher_profile' %}" class="nav-link {% if active_sidebar_item == 'profile' %}active{% endif %}" {% if active_sidebar_item == 'profile' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-user-edit"></i><p>My Profile</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_student' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'manage_student' %}" class="nav-link {% if active_sidebar_item == 'learners' %}active{% endif %}" {% if active_sidebar_item == 'learners' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-users"></i><p>Manage Learners</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_subject' %}" class="nav-link">
-                    <i class="nav-icon fas fa-book-reader"></i><p>Subjects</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_student_results' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'teacher_classes_subjects' %}" class="nav-link {% if active_sidebar_item == 'classes_subjects' %}active{% endif %}" {% if active_sidebar_item == 'classes_subjects' %}aria-current="page"{% endif %}>
+                    <i class="nav-icon fas fa-book-reader"></i><p>My Classes and Subjects</p></a></li>
+                <li class="nav-item"><a href="{% url 'learner_requests' %}" class="nav-link {% if active_sidebar_item == 'requests' %}active{% endif %}" {% if active_sidebar_item == 'requests' %}aria-current="page"{% endif %}>
+                    <i class="nav-icon fas fa-user-check"></i>
+                    <p>Learner Requests
+                        {% if pending_teacher_request_count %}
+                        <span class="badge badge-warning right">{{ pending_teacher_request_count }}</span>
+                        {% endif %}
+                    </p></a></li>
+                <li class="nav-item"><a href="{% url 'manage_student_results' %}" class="nav-link {% if active_sidebar_item == 'results' %}active{% endif %}" {% if active_sidebar_item == 'results' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-chart-bar"></i><p>Manage Results</p></a></li>
-                <li class="nav-item"><a href="{% url 'manage_assessment_weights' %}" class="nav-link">
-                    <i class="nav-icon fas fa-balance-scale"></i><p>Assessment Weights</p></a></li>
-                <li class="nav-item"><a href="{% url 'generate_report_card' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'generate_report_card' %}" class="nav-link {% if active_sidebar_item == 'report_cards' %}active{% endif %}" {% if active_sidebar_item == 'report_cards' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-file-alt"></i><p>Report Cards</p></a></li>
-                <li class="nav-item"><a href="{% url 'teacher_attendance' %}" class="nav-link">
-                    <i class="nav-icon fas fa-calendar-check"></i><p>Attendance</p></a></li>
-                <li class="nav-item"><a href="{% url 'generate_report' %}" class="nav-link">
-                    <i class="nav-icon fas fa-file-pdf"></i><p>Class / Results / Attendance Reports</p></a></li>
+                <li class="nav-item"><a href="{% url 'generate_report' %}" class="nav-link {% if active_sidebar_item == 'reports' %}active{% endif %}" {% if active_sidebar_item == 'reports' %}aria-current="page"{% endif %}>
+                    <i class="nav-icon fas fa-file-pdf"></i><p>Class / Results Reports</p></a></li>
                 {% else %}
-                <li class="nav-item"><a href="{% url 'student_home' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_home' %}" class="nav-link {% if active_sidebar_item == 'home' %}active{% endif %}" {% if active_sidebar_item == 'home' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-home"></i><p>Home</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_view_profile' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_view_profile' %}" class="nav-link {% if active_sidebar_item == 'profile' %}active{% endif %}" {% if active_sidebar_item == 'profile' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-user-edit"></i><p>My Profile</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_view_subjects' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_view_subjects' %}" class="nav-link {% if active_sidebar_item == 'subjects' %}active{% endif %}" {% if active_sidebar_item == 'subjects' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-book-reader"></i><p>My Subjects</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_view_result' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_view_result' %}" class="nav-link {% if active_sidebar_item == 'results' %}active{% endif %}" {% if active_sidebar_item == 'results' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-chart-bar"></i><p>View Results</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_attendance' %}" class="nav-link">
-                    <i class="nav-icon fas fa-calendar-check"></i><p>My Attendance</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_view_notification' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_view_notification' %}" class="nav-link {% if active_sidebar_item == 'notifications' %}active{% endif %}" {% if active_sidebar_item == 'notifications' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-bell"></i><p>View Notifications</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_apply_leave' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_apply_leave' %}" class="nav-link {% if active_sidebar_item == 'leave' %}active{% endif %}" {% if active_sidebar_item == 'leave' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-calendar-minus"></i><p>Apply For Leave</p></a></li>
-                <li class="nav-item"><a href="{% url 'student_feedback' %}" class="nav-link">
+                <li class="nav-item"><a href="{% url 'student_feedback' %}" class="nav-link {% if active_sidebar_item == 'feedback' %}active{% endif %}" {% if active_sidebar_item == 'feedback' %}aria-current="page"{% endif %}>
                     <i class="nav-icon fas fa-comments"></i><p>Feedback</p></a></li>
                 {% endif %}
+                <li class="nav-item">
+                    <a href="{% url 'recycle_bin' %}"
+                       class="nav-link {% if active_sidebar_item == 'recycle_bin' %}active{% endif %}"
+                       {% if active_sidebar_item == 'recycle_bin' %}aria-current="page"{% endif %}>
+                        <i class="nav-icon fas fa-trash-restore"></i><p>Recycle Bin</p>
+                    </a>
+                </li>
                 <li class="nav-item">
                     <a href="{% url 'user_logout' %}"
                        onclick="return confirm('Your session would be terminated.\n\nProceed?')"

@@ -1,15 +1,29 @@
 from django.contrib import messages
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.decorators import login_required
-from django.core.paginator import Paginator
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch
+from django.core.paginator import Paginator
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 
-from .forms import AttendanceSelectionForm, ProfileUpdateForm
-from .models import Attendance, AttendanceReport, Student, Subject
+from .forms import (
+    ProfileUpdateForm,
+    TeacherClassSetupForm,
+    TeacherRequestFilterForm,
+    TeacherSubjectSetupForm,
+)
+from .models import (
+    LearnerTeacherRequest,
+    Student,
+    Subject,
+    Teacher,
+    TeacherClassSetup,
+    school_class_from_label,
+)
 from .scoping import visible_students, visible_subjects
+from .teacher_requests import create_requests_for_class
 from .views import render_pin_confirmation, update_profile_from_form
 
 
@@ -33,7 +47,7 @@ def teacher_profile(request):
     )
     if request.method == 'POST' and form.is_valid():
         new_password, issued_pin = update_profile_from_form(user, form)
-        if new_password:
+        if new_password or issued_pin:
             update_session_auth_hash(request, user)
         if issued_pin:
             return render_pin_confirmation(
@@ -55,114 +69,141 @@ def teacher_profile(request):
 
 
 @login_required
-def teacher_attendance(request):
-    selection_data = (
-        request.POST
-        if request.method == 'POST'
-        else request.GET or None
-    )
-    selection_form = AttendanceSelectionForm(
-        selection_data, user=request.user)
-    attendance = None
-    roster = []
-    statuses = {}
-    selection_loaded = False
-    selection_details = {}
+def teacher_classes_subjects(request):
+    teacher = get_object_or_404(Teacher, teacher=request.user)
+    class_form = TeacherClassSetupForm()
+    subject_form = TeacherSubjectSetupForm(user=request.user)
 
-    if selection_form.is_valid():
-        selection_loaded = True
-        course = selection_form.cleaned_data['course']
-        subject = selection_form.cleaned_data['subject']
-        academic_period = selection_form.cleaned_data['academic_period']
-        date = selection_form.cleaned_data['date']
-        selection_details = {
-            'course': course,
-            'subject': subject,
-            'academic_period': academic_period,
-            'date': date,
-        }
-        attendance = Attendance.objects.filter(
-            course=course,
-            subject=subject,
-            academic_period=academic_period,
-            date=date,
-        ).filter(
-            Q(subject__teacher__teacher=request.user)
-            | Q(subject__teacher__isnull=True)
-        ).first()
-        roster = list(visible_students(request.user).filter(
-            course=course,
-            academic_period=academic_period,
-        ).select_related('admin').order_by(
-            'admin__last_name', 'admin__first_name'))
-        if attendance:
-            statuses = {
-                record.student_id: record.status
-                for record in AttendanceReport.objects.filter(
-                    attendance=attendance,
-                    student__in=roster,
+    if request.method == 'POST' and request.POST.get('action') == 'add_class':
+        class_form = TeacherClassSetupForm(request.POST)
+        if class_form.is_valid():
+            school_class = school_class_from_label(
+                class_form.cleaned_data['grade_and_class'])
+            with transaction.atomic():
+                _, created = TeacherClassSetup.objects.get_or_create(
+                    teacher=teacher,
+                    school_class=school_class,
                 )
-            }
+                if created:
+                    create_requests_for_class(school_class)
+            messages.success(request, 'Class setup saved.')
+            return redirect(reverse('teacher_classes_subjects'))
 
-        if request.method == 'POST':
-            submitted_statuses = {}
-            submitted_values = {}
-            for learner in roster:
-                value = request.POST.get(f'attendance_{learner.pk}')
-                submitted_values[learner.pk] = value
-                if value not in ('present', 'absent'):
-                    selection_form.add_error(
-                        None, 'Select present or absent for every learner.')
-                    break
-                submitted_statuses[learner.pk] = value == 'present'
-
-            if not selection_form.errors:
-                with transaction.atomic():
-                    attendance, _ = Attendance.objects.get_or_create(
-                        course=course,
-                        subject=subject,
-                        academic_period=academic_period,
-                        date=date,
-                        defaults={
-                            'created_by_id': request.user.teacher.pk,
-                        },
+    if request.method == 'POST' and request.POST.get('action') == 'add_subject':
+        subject_form = TeacherSubjectSetupForm(
+            request.POST, user=request.user)
+        if subject_form.is_valid():
+            school_class = subject_form.cleaned_data['school_class']
+            if not TeacherClassSetup.objects.filter(
+                teacher=teacher, school_class=school_class,
+            ).exists():
+                subject_form.add_error(
+                    'school_class', 'Choose one of your configured classes.')
+            else:
+                subject_name = subject_form.cleaned_data['name'].strip()
+                if Subject.objects.filter(
+                    teacher=teacher,
+                    school_class=school_class,
+                    name__iexact=subject_name,
+                ).exists():
+                    subject_form.add_error(
+                        'name',
+                        'You have already added this subject for the class.')
+                else:
+                    Subject.objects.create(
+                        name=subject_name,
+                        teacher=teacher,
+                        school_class=school_class,
+                        created_by=teacher,
                     )
-                    for learner in roster:
-                        attendance_report, created = (
-                            AttendanceReport.objects.get_or_create(
-                                attendance=attendance,
-                                student=learner,
-                                defaults={
-                                    'status': submitted_statuses[learner.pk],
-                                    'created_by_id': request.user.teacher.pk,
-                                },
-                            ))
-                        if not created:
-                            attendance_report.status = (
-                                submitted_statuses[learner.pk])
-                            attendance_report.save(update_fields=['status'])
-                messages.success(request, 'Attendance saved successfully.')
-                return redirect(
-                    f'{reverse("teacher_attendance")}?course={course.pk}'
-                    f'&subject={subject.pk}&academic_period={academic_period.pk}&date={date}'
-                )
+                    messages.success(request, 'Subject setup saved.')
+                    return redirect(reverse('teacher_classes_subjects'))
 
-            statuses = submitted_values
-
-    for learner in roster:
-        value = statuses.get(learner.pk)
-        learner.attendance_choice = (
-            'present' if value is True or value == 'present'
-            else 'absent' if value is False or value == 'absent'
-            else ''
-        )
-
-    return render(request, 'hod_template/teacher_attendance.html', {
-        'form': selection_form,
-        'roster': roster,
-        'statuses': statuses,
-        'attendance': attendance,
-        'selection_loaded': selection_loaded,
-        'selection_details': selection_details,
-        'page_title': 'Attendance',
+    setups = TeacherClassSetup.objects.filter(
+        teacher=teacher).select_related('school_class').prefetch_related(
+            Prefetch(
+                'school_class__subject_set',
+                queryset=Subject.objects.filter(teacher=teacher).order_by(
+                    'name'),
+                to_attr='setup_subjects',
+            ))
+    return render(request, 'teacher_template/classes_subjects.html', {
+        'setups': setups,
+        'class_form': class_form,
+        'subject_form': subject_form,
+        'page_title': 'My Classes and Subjects',
     })
+
+
+@login_required
+def learner_requests(request):
+    teacher = get_object_or_404(Teacher, teacher=request.user)
+    filter_form = TeacherRequestFilterForm(request.GET, user=request.user)
+    school_class = None
+    if filter_form.is_valid():
+        school_class = filter_form.cleaned_data.get('school_class')
+
+    pending_requests = LearnerTeacherRequest.objects.filter(
+        teacher=teacher,
+        status=LearnerTeacherRequest.PENDING,
+    ).select_related(
+        'student__admin', 'student__school_class', 'school_class')
+    if school_class:
+        pending_requests = pending_requests.filter(
+            school_class=school_class)
+
+    if request.method == 'POST':
+        post_filter = TeacherRequestFilterForm(
+            request.POST, user=request.user)
+        if post_filter.is_valid():
+            school_class = post_filter.cleaned_data.get('school_class')
+            pending_requests = LearnerTeacherRequest.objects.filter(
+                teacher=teacher,
+                status=LearnerTeacherRequest.PENDING,
+            )
+            if school_class:
+                pending_requests = pending_requests.filter(
+                    school_class=school_class)
+            action = request.POST.get('action')
+            if action in ('accept', 'decline'):
+                pending_requests = pending_requests.filter(
+                    pk=request.POST.get('request_id'))
+            if action in ('accept', 'decline', 'accept_all', 'decline_all'):
+                affected_count = pending_requests.count()
+                if not affected_count:
+                    messages.error(request, 'No pending requests matched.')
+                    target = reverse('learner_requests')
+                    if school_class:
+                        target = f'{target}?school_class={school_class.pk}'
+                    return redirect(target)
+                status = (
+                    LearnerTeacherRequest.ACCEPTED
+                    if action in ('accept', 'accept_all')
+                    else LearnerTeacherRequest.DECLINED
+                )
+                responded_at = timezone.now()
+                with transaction.atomic():
+                    for learner_request in pending_requests:
+                        learner_request.status = status
+                        learner_request.responded_at = responded_at
+                        learner_request.save(
+                            update_fields=['status', 'responded_at'])
+                messages.success(
+                    request,
+                    f'{affected_count} learner request(s) updated.',
+                )
+                target = reverse('learner_requests')
+                if school_class:
+                    target = f'{target}?school_class={school_class.pk}'
+                return redirect(target)
+        messages.error(request, 'Choose a valid request action and class.')
+
+    pending_count = pending_requests.count()
+    return render(request, 'teacher_template/learner_requests.html', {
+        'requests': pending_requests,
+        'filter_form': filter_form,
+        'pending_count': pending_count,
+        'page_title': 'Learner Requests',
+    })
+
+

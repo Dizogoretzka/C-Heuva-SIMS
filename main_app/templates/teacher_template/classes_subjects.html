@@ -1,0 +1,74 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-lg-5">
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">Add a class</h3></div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="action" value="add_class">
+                        <div class="card-body">
+                            {% for field in class_form %}
+                            <div class="form-group">
+                                {{ field.label_tag }} {{ field }}
+                                {% if field.help_text %}<small class="form-text text-muted">{{ field.help_text }}</small>{% endif %}
+                                {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                            </div>
+                            {% endfor %}
+                            {% for error in class_form.non_field_errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                        </div>
+                        <div class="card-footer">
+                            <button class="btn btn-primary" type="submit">Add class</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            <div class="col-lg-7">
+                <div class="card">
+                    <div class="card-header"><h3 class="card-title">Add a subject</h3></div>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="action" value="add_subject">
+                        <div class="card-body">
+                            {% for field in subject_form %}
+                            <div class="form-group">
+                                {{ field.label_tag }} {{ field }}
+                                {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                            </div>
+                            {% endfor %}
+                            {% for error in subject_form.non_field_errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                        </div>
+                        <div class="card-footer">
+                            <button class="btn btn-primary" type="submit" {% if not setups %}disabled{% endif %}>Add subject</button>
+                            {% if not setups %}<span class="text-muted ml-2">Add a class first.</span>{% endif %}
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">My Classes and Subjects</h3></div>
+            <div class="card-body">
+                {% for setup in setups %}
+                <div class="border rounded p-3 mb-3">
+                    <h4>{{ setup.school_class }}</h4>
+                    <ul class="mb-0">
+                        {% for subject in setup.school_class.setup_subjects %}
+                        <li>{{ subject.name }}</li>
+                        {% empty %}
+                        <li>No subjects set up for this class yet.</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% empty %}
+                <p class="mb-0">You have not set up any classes yet.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

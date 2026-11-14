@@ -1,11 +1,15 @@
+import ast
 import json
 import logging
 import csv
+import re
 import secrets
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
-from xml.sax.saxutils import escape
+from types import SimpleNamespace
+from xml.sax.saxutils import escape, unescape
 
 import requests
 from django.conf import settings
@@ -15,44 +19,64 @@ from django.contrib.auth import update_session_auth_hash
 from django.core.files.storage import FileSystemStorage
 from django.core.paginator import Paginator
 from django.contrib.staticfiles import finders
-from django.db import transaction
-from django.db.models import Count, ExpressionWrapper, F, FloatField, Q
-from django.http import HttpResponse, HttpResponseForbidden
+from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import Count, ExpressionWrapper, F, FloatField, Prefetch, Q
+from django.http import HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.templatetags.static import static
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.text import slugify
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import (
+    require_GET,
+    require_http_methods,
+    require_POST,
+)
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Image as ReportImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+import reportlab
 
 from .forms import *
 from .credentials import issue_pin
 from .grading import (
-    calculate_final_mark,
-    get_assessment_weights,
-    get_grade_band,
-    get_test_scores,
-    get_test_weights,
+    GRADING_SCALE,
+    active_assessments,
+    prepare_result,
+    previous_period_plan,
 )
 from .learner_imports import (
+    LEARNER_IMPORT_CHUNK_SIZE,
     LearnerImportError,
+    learner_import_password,
     parse_learner_upload,
     validate_learner_rows,
 )
 from .models import *
 from .scoping import (
     teacher_profile,
-    visible_attendance,
     visible_results,
     visible_students,
     visible_subjects,
 )
 from .views import render_pin_confirmation, update_profile_from_form
+from .teacher_requests import (
+    create_class_requests,
+    create_requests_for_class,
+    reset_class_requests,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +84,12 @@ logger = logging.getLogger(__name__)
 def admin_home(request):
     total_students = Student.objects.all().count()
     recent_logins = LoginActivity.objects.select_related(
-        'student__admin', 'student__course'
+        'student__admin', 'student__school_class'
     ).order_by('-logged_in_at')[:5]
     context = {
         'page_title': "Administrative Dashboard",
         'total_students': total_students,
         'total_subject': Subject.objects.count(),
-        'total_grade_bands': GradeBand.objects.count(),
         'learners_logged_in_today': LoginActivity.objects.filter(
             logged_in_at__date=timezone.localdate()
         ).values('student_id').distinct().count(),
@@ -89,12 +112,49 @@ def manage_academic_periods(request):
         messages.success(request, 'Academic period added successfully.')
         return redirect(reverse('manage_academic_periods'))
 
+    search_query = request.GET.get('search', '').strip()
     periods = AcademicPeriod.objects.order_by(
         '-year', 'term', '-start_year', '-pk')
+    if search_query:
+        numbers = [int(value) for value in re.findall(r'\d+', search_query)]
+        if numbers:
+            periods = periods.filter(
+                Q(year__in=numbers)
+                | Q(term__in=numbers)
+                | Q(start_year__year__in=numbers)
+                | Q(end_year__year__in=numbers)
+            ).distinct()
+        elif search_query.casefold() == 'current':
+            periods = periods.filter(is_current=True)
+        else:
+            periods = periods.none()
     return render(request, 'hod_template/manage_academic_periods.html', {
         'form': form,
         'periods': periods,
+        'search_query': search_query,
         'page_title': 'Manage Academic Periods',
+    })
+
+
+@login_required
+def school_profile(request):
+    if request.user.user_type != '1':
+        return redirect(reverse('admin_home'))
+
+    profile, _ = SchoolProfile.objects.get_or_create(pk=1)
+    form = SchoolProfileForm(
+        request.POST or None,
+        request.FILES or None,
+        instance=profile,
+    )
+    if request.method == 'POST' and form.is_valid():
+        form.save()
+        messages.success(request, 'School profile updated successfully.')
+        return redirect(reverse('school_profile'))
+    return render(request, 'hod_template/school_profile.html', {
+        'form': form,
+        'profile': profile,
+        'page_title': 'School Profile',
     })
 
 
@@ -146,15 +206,13 @@ def delete_academic_period(request, period_id):
             studentresult__isnull=False,
         ).exists() or StudentResult.objects.filter(
             academic_period=period).exists()
-        has_attendance = Attendance.objects.filter(
+        has_assessments = AssessmentPlan.objects.filter(
             academic_period=period).exists()
-        has_weights = AssessmentWeight.objects.filter(
-            academic_period=period).exists()
-        if has_results or has_attendance or has_weights:
+        if has_results or has_assessments:
             messages.error(
                 request,
                 'This academic period cannot be deleted because it has '
-                'results, assessment weights, or attendance.',
+                'results or assessment settings.',
             )
         else:
             period.delete()
@@ -164,68 +222,153 @@ def delete_academic_period(request, period_id):
 
 @login_required
 def learner_login_activity(request):
-    if request.user.user_type != '1':
-        return redirect(reverse('student_home'))
+    if request.GET:
+        params = request.GET.copy()
+        if params.get('learner'):
+            params['search'] = params.pop('learner')
+        if params.get('date'):
+            params['start_date'] = params.pop('date')
+            params['end_date'] = params['start_date']
+        params.pop('school_class', None)
+        params.pop('page', None)
+        return redirect(f'{reverse("activity_log")}?{params.urlencode()}')
+    return redirect(reverse('activity_log'))
 
-    filter_form = LoginActivityFilterForm(request.GET)
-    activities = LoginActivity.objects.select_related(
-        'student__admin', 'student__course'
-    ).order_by('-logged_in_at')
-    if filter_form.is_valid():
-        learner = filter_form.cleaned_data.get('learner')
-        login_date = filter_form.cleaned_data.get('date')
-        course = filter_form.cleaned_data.get('course')
-        if learner:
-            activities = activities.filter(
-                Q(student__admin__first_name__icontains=learner)
-                | Q(student__admin__last_name__icontains=learner)
-                | Q(student__admin__username__icontains=learner)
-            )
-        if login_date:
-            activities = activities.filter(logged_in_at__date=login_date)
-        if course:
-            activities = activities.filter(student__course=course)
 
-    export_format = request.GET.get('export')
-    if export_format in ('pdf', 'csv') and not filter_form.is_valid():
-        return HttpResponse(
-            'Invalid learner-login filters.', status=400,
-            content_type='text/plain',
-        )
-    if export_format in ('pdf', 'csv'):
-        headers = ['Learner', 'Username', 'Course / grade', 'Date and time']
-        rows = [[
-            activity.student.admin.get_full_name()
-            or activity.student.admin.username,
-            activity.student.admin.username,
-            activity.student.course or 'Not assigned',
-            activity.logged_in_at.strftime('%Y-%m-%d %H:%M:%S'),
-        ] for activity in activities]
-        if not rows:
-            messages.warning(
-                request, 'No login activity matches these filters.')
-        else:
-            return _export_data(
-                request,
-                request.user,
-                'Learner Login Activity',
-                headers,
-                rows,
-                export_format,
-            )
+def _activity_change_map(value):
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            parsed = parser(value)
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
-    paginator = Paginator(activities, 25)
-    page_obj = paginator.get_page(request.GET.get('page'))
-    query_params = request.GET.copy()
-    query_params.pop('page', None)
-    query_params.pop('export', None)
-    context = {
-        'page_title': 'Learner Login Activity',
-        'filter_form': filter_form,
-        'page_obj': page_obj,
-        'query_params': query_params.urlencode(),
+
+def _activity_sentence(entry):
+    actor = entry.actor_username or 'System'
+    action_labels = {
+        'create': 'created',
+        'update': 'changed',
+        'delete': 'deleted',
+        'sign_in': 'signed in',
+        'sign_out': 'signed out',
+        'failed_sign_in': 'had a failed sign-in attempt',
+        'export': 'exported',
+        'import': 'imported',
     }
-    return render(request, 'hod_template/learner_login_activity.html', context)
+    action = action_labels.get(entry.action, entry.action.replace('_', ' '))
+    record = (entry.object_type or 'record').replace('.', ' ')
+    if entry.object_id:
+        record = f'{record} #{entry.object_id}'
+    timestamp = timezone.localtime(entry.created_at).strftime(
+        '%d %B %Y at %H:%M')
+    changes = _activity_change_map(entry.changes)
+    if entry.object_type == 'main_app.studentresult':
+        result = StudentResult.objects.select_related(
+            'student__admin', 'student__school_class', 'subject'
+        ).filter(pk=entry.object_id).first()
+        if result:
+            changed_scores = []
+            score_change = _activity_change_map(
+                changes.get('assessment_scores'))
+            if isinstance(score_change, dict):
+                old_scores = _activity_change_map(score_change.get('old'))
+                new_scores = _activity_change_map(score_change.get('new'))
+                old_scores = {
+                    str(key): value for key, value in old_scores.items()
+                }
+                new_scores = {
+                    str(key): value for key, value in new_scores.items()
+                }
+                keys = set(old_scores) | set(new_scores)
+                assessment_map = {
+                    str(item.pk): item.name
+                    for item in Assessment.objects.filter(
+                        plan__subject=result.subject)
+                }
+                for key in sorted(keys):
+                    if old_scores.get(key) == new_scores.get(key):
+                        continue
+                    assessment_name = assessment_map.get(
+                        str(key), f'Assessment {key}')
+                    changed_scores.append(
+                        f'{assessment_name} from '
+                        f'{old_scores.get(key, "blank")} to '
+                        f'{new_scores.get(key, "blank")}')
+            learner_name = (
+                result.student.admin.get_full_name().strip()
+                or result.student.admin.username)
+            class_name = result.student.school_class or 'unassigned class'
+            subject_name = result.subject.name
+            if changed_scores:
+                verb = 'entered' if entry.action == 'create' else 'changed'
+                return (
+                    f'{actor} {verb} {"; ".join(changed_scores)} for '
+                    f'{learner_name} in {class_name} {subject_name} '
+                    f'on {timestamp}.'
+                )
+    if entry.object_type == 'main_app.assessment' and entry.action == 'update':
+        assessment = Assessment.objects.select_related(
+            'plan__school_class', 'plan__subject'
+        ).filter(pk=entry.object_id).first()
+        if assessment:
+            for field in ('weight', 'maximum_mark', 'name'):
+                change = _activity_change_map(changes.get(field))
+                if (
+                    isinstance(change, dict)
+                    and change.get('old') != change.get('new')
+                ):
+                    detail = {
+                        'weight': 'weight',
+                        'maximum_mark': 'maximum mark',
+                        'name': 'name',
+                    }[field]
+                    return (
+                        f'{actor} changed the {detail} for {assessment.name} '
+                        f'in {assessment.plan.school_class} '
+                        f'{assessment.plan.subject.name} from '
+                        f'{change.get("old")} to {change.get("new")} '
+                        f'on {timestamp}.'
+                    )
+    description = entry.description or record
+    details = []
+    for field, raw_values in changes.items():
+        normalized_field = field.lower()
+        if any(
+            sensitive_part in normalized_field
+            for sensitive_part in (
+                'password', 'pin', 'hash', 'secret', 'token')
+        ):
+            continue
+        values = _activity_change_map(raw_values)
+        if not isinstance(values, dict) or not {'old', 'new'} <= values.keys():
+            continue
+        old_value = values.get('old')
+        new_value = values.get('new')
+        if old_value == '[redacted]' or new_value == '[redacted]':
+            continue
+        details.append(
+            f'{field.replace("_", " ")} from {old_value or "blank"} '
+            f'to {new_value or "blank"}')
+    if details and entry.action == 'update':
+        description = '; '.join(details)
+    if entry.action == 'update' and details:
+        return f'{actor} {action} {description} on {record} at {timestamp}.'
+    return f'{actor} {action} {description} ({record}) at {timestamp}.'
+
+
+def _activity_role_label(user):
+    return {
+        '1': 'Administrator',
+        '2': 'Learner',
+        '3': 'Teacher',
+    }.get(str(user.user_type), 'Unknown') if user else 'Unknown'
 
 
 @login_required
@@ -243,6 +386,7 @@ def activity_log(request, user_id=None):
     filter_valid = filter_form.is_valid()
     if filter_valid:
         search = filter_form.cleaned_data['search']
+        role = filter_form.cleaned_data['role']
         action = filter_form.cleaned_data['action']
         start_date = filter_form.cleaned_data['start_date']
         end_date = filter_form.cleaned_data['end_date']
@@ -254,13 +398,83 @@ def activity_log(request, user_id=None):
                 | Q(target_username__icontains=search)
                 | Q(target_user__username__icontains=search)
             )
+        if role:
+            activities = activities.filter(
+                Q(actor__user_type=role)
+                | Q(target_user__user_type=role)
+            )
         if action:
             activities = activities.filter(action=action)
         if start_date:
             activities = activities.filter(created_at__date__gte=start_date)
         if end_date:
             activities = activities.filter(created_at__date__lte=end_date)
-    activities = activities.order_by('-created_at', '-pk')
+    activities = list(activities.order_by('-created_at', '-pk'))
+    legacy_logins = LoginActivity.objects.select_related(
+        'student__admin', 'student__school_class')
+    if target_user:
+        legacy_logins = legacy_logins.filter(student__admin=target_user)
+    if filter_valid:
+        search = filter_form.cleaned_data['search']
+        role = filter_form.cleaned_data['role']
+        action = filter_form.cleaned_data['action']
+        start_date = filter_form.cleaned_data['start_date']
+        end_date = filter_form.cleaned_data['end_date']
+        if search:
+            legacy_logins = legacy_logins.filter(
+                Q(student__admin__first_name__icontains=search)
+                | Q(student__admin__last_name__icontains=search)
+                | Q(student__admin__username__icontains=search))
+        if action and action != 'sign_in':
+            legacy_logins = legacy_logins.none()
+        if role and role != '2':
+            legacy_logins = legacy_logins.none()
+        if start_date:
+            legacy_logins = legacy_logins.filter(
+                logged_in_at__date__gte=start_date)
+        if end_date:
+            legacy_logins = legacy_logins.filter(
+                logged_in_at__date__lte=end_date)
+    for login in legacy_logins:
+        user = login.student.admin
+        if ActivityLog.objects.filter(
+            action='sign_in',
+            target_user=user,
+            created_at__gte=login.logged_in_at - timedelta(seconds=5),
+            created_at__lte=login.logged_in_at + timedelta(seconds=5),
+        ).exists():
+            continue
+        activities.append(SimpleNamespace(
+            pk=f'legacy-{login.pk}',
+            actor=user,
+            actor_id=user.pk,
+            actor_username=user.get_username(),
+            target_user=user,
+            target_username=user.get_username(),
+            action='sign_in',
+            action_label='Sign in',
+            object_type='Learner login',
+            object_id=str(login.student_id),
+            description=(
+                f'{user.get_full_name() or user.get_username()} signed in'),
+            display_description=(
+                f'{user.get_full_name() or user.get_username()} signed in '
+                f'on {timezone.localtime(login.logged_in_at):%d %B %Y at %H:%M}.'),
+            changes={},
+            ip_address=login.ip_address,
+            created_at=login.logged_in_at,
+        ))
+    activities.sort(key=lambda item: (item.created_at, str(item.pk)), reverse=True)
+    for entry in activities:
+        entry.action_label = (
+            entry.action_label if hasattr(entry, 'action_label')
+            else entry.get_action_display())
+        entry.display_description = (
+            entry.display_description if hasattr(entry, 'display_description')
+            else _activity_sentence(entry))
+        entry.role_label = _activity_role_label(
+            getattr(entry, 'actor', None)
+            or getattr(entry, 'target_user', None))
 
     export_format = request.GET.get('export')
     if export_format in ('pdf', 'csv') and not filter_valid:
@@ -271,20 +485,17 @@ def activity_log(request, user_id=None):
 
     if export_format in ('pdf', 'csv'):
         headers = [
-            'Timestamp', 'Actor', 'Action', 'Record type', 'Record ID',
-            'Target user', 'Target user ID', 'Description', 'Changes',
-            'IP address',
+            'Timestamp', 'Actor', 'Role', 'Action', 'Record',
+            'Target user', 'Description', 'IP address',
         ]
         rows = [[
                 item.created_at.isoformat(),
                 item.actor_username,
-                item.get_action_display(),
-                item.object_type,
-                item.object_id,
+                item.role_label,
+                item.action_label,
+                f'{item.object_type} {item.object_id}'.strip(),
                 item.target_username,
-                item.target_user_id_snapshot,
-                item.description,
-                json.dumps(item.changes, sort_keys=True),
+                item.display_description,
                 item.ip_address or '',
             ] for item in activities]
         if not rows:
@@ -294,7 +505,15 @@ def activity_log(request, user_id=None):
                 f'Activity Timeline {target_user.get_username()}'
                 if target_user else 'Activity Log')
             return _export_data(
-                request, request.user, title, headers, rows, export_format)
+                request,
+                request.user,
+                title,
+                headers,
+                rows,
+                export_format,
+                report_template=(
+                    'activity_timeline' if target_user else 'activity_log'),
+            )
 
     paginator = Paginator(activities, 50)
     page_obj = paginator.get_page(request.GET.get('page'))
@@ -315,6 +534,13 @@ def activity_log(request, user_id=None):
 def manage_teachers(request):
     teachers = Teacher.objects.select_related('teacher').order_by(
         'teacher__last_name', 'teacher__first_name')
+    search_query = request.GET.get('search', '').strip()
+    if search_query:
+        teachers = teachers.filter(
+            Q(teacher__first_name__icontains=search_query)
+            | Q(teacher__last_name__icontains=search_query)
+            | Q(teacher__username__icontains=search_query)
+        )
     export_format = request.GET.get('export')
     if export_format in ('pdf', 'csv'):
         rows = [[
@@ -330,80 +556,243 @@ def manage_teachers(request):
                 request,
                 request.user,
                 'Teacher List',
-                ['Teacher name', 'Username', 'Gender'],
+                ['Teacher name', 'Account ID', 'Gender'],
                 rows,
                 export_format,
+                report_template='teacher_list',
             )
     return render(request, 'hod_template/manage_teachers.html', {
         'teachers': teachers,
+        'search_query': search_query,
         'page_title': 'Manage Teachers',
     })
 
 
 @login_required
+def manage_admins(request):
+    if request.user.user_type != '1':
+        return redirect(reverse('admin_home'))
+
+    form = TeacherAccountForm(request.POST or None, request.FILES or None)
+    if request.method == 'POST' and form.is_valid():
+        data = form.cleaned_data
+        with transaction.atomic():
+            user = CustomUser.objects.create_user(
+                email='',
+                password=None,
+                user_type='1',
+                first_name=data['first_name'],
+                last_name=data['last_name'],
+                gender=data['gender'],
+                address='',
+                profile_pic=data.get('profile_pic') or '',
+            )
+            Admin.objects.get_or_create(admin=user)
+            pin = issue_pin(user)
+        return render_pin_confirmation(
+            request,
+            'admin',
+            pin,
+            return_url=reverse('manage_admins'),
+            return_label='Return to administrators',
+            account_id=user.username,
+        )
+
+    admins = Admin.objects.select_related('admin').order_by(
+        'admin__last_name', 'admin__first_name')
+    return render(request, 'hod_template/manage_admins.html', {
+        'form': form,
+        'admins': admins,
+        'page_title': 'Manage Administrators',
+    })
+
+
+@login_required
+@require_GET
 def manage_assignments(request):
     filter_form = TeacherGradeFilterForm(request.GET)
-    learner_form = LearnerAssignmentForm(prefix='learners')
-    subject_form = SubjectAssignmentForm(prefix='subjects')
-    unassigned_learners = visible_students(request.user).filter(
-        teacher__isnull=True)
-    unassigned_subjects = visible_subjects(request.user).filter(
-        teacher__isnull=True)
-    if request.user.user_type == '1' and filter_form.is_valid():
-        course = filter_form.cleaned_data['course']
-        current_teacher = filter_form.cleaned_data['teacher']
-        if course:
-            unassigned_learners = unassigned_learners.filter(course=course)
-            unassigned_subjects = unassigned_subjects.filter(
-                Q(course=course) | Q(course__isnull=True))
-            learner_form.fields['learners'].queryset = (
-                learner_form.fields['learners'].queryset.filter(course=course))
-            subject_form.fields['subjects'].queryset = (
-                subject_form.fields['subjects'].queryset.filter(
-                    Q(course=course) | Q(course__isnull=True)))
-        if current_teacher:
-            learner_form.fields['learners'].queryset = (
-                learner_form.fields['learners'].queryset.filter(
-                    teacher=current_teacher))
-            subject_form.fields['subjects'].queryset = (
-                subject_form.fields['subjects'].queryset.filter(
-                    teacher=current_teacher))
-    if request.method == 'POST':
-        form_type = request.POST.get('assignment_type')
-        if form_type == 'learners':
-            learner_form = LearnerAssignmentForm(
-                request.POST, prefix='learners')
-            if learner_form.is_valid():
-                assigned_teacher = learner_form.cleaned_data['teacher']
-                with transaction.atomic():
-                    for learner in learner_form.cleaned_data['learners']:
-                        if learner.teacher_id != getattr(
-                                assigned_teacher, 'pk', None):
-                            learner.teacher = assigned_teacher
-                            learner.save(update_fields=['teacher', 'updated_at'])
-                messages.success(request, 'Learner assignments updated.')
-                return redirect(reverse('manage_assignments'))
-        elif form_type == 'subjects':
-            subject_form = SubjectAssignmentForm(
-                request.POST, prefix='subjects')
-            if subject_form.is_valid():
-                assigned_teacher = subject_form.cleaned_data['teacher']
-                with transaction.atomic():
-                    for subject in subject_form.cleaned_data['subjects']:
-                        if subject.teacher_id != getattr(
-                                assigned_teacher, 'pk', None):
-                            subject.teacher = assigned_teacher
-                            subject.save(update_fields=['teacher', 'updated_at'])
-                messages.success(request, 'Subject assignments updated.')
-                return redirect(reverse('manage_assignments'))
+    selected_teacher = None
+    selected_class = None
+    if filter_form.is_valid():
+        selected_teacher = filter_form.cleaned_data['teacher']
+        selected_class = filter_form.cleaned_data['school_class']
 
+    setups = TeacherClassSetup.objects.select_related(
+        'teacher__teacher', 'school_class').prefetch_related(
+            Prefetch(
+                'school_class__subject_set',
+                queryset=Subject.objects.order_by('name'),
+                to_attr='setup_subjects',
+            ))
+    if selected_teacher:
+        setups = setups.filter(teacher=selected_teacher)
+    if selected_class:
+        setups = setups.filter(school_class=selected_class)
+
+    rows = []
+    setup_teacher_ids = set()
+    for setup in setups:
+        setup_teacher_ids.add(setup.teacher_id)
+        requests_for_setup = LearnerTeacherRequest.objects.filter(
+            teacher=setup.teacher,
+            school_class=setup.school_class,
+        )
+        accepted_count = requests_for_setup.filter(
+            status=LearnerTeacherRequest.ACCEPTED).count()
+        pending_count = requests_for_setup.filter(
+            status=LearnerTeacherRequest.PENDING).count()
+        declined_count = requests_for_setup.filter(
+            status=LearnerTeacherRequest.DECLINED).count()
+        rows.append({
+            'teacher': setup.teacher,
+            'school_class': setup.school_class,
+            'subjects': [
+                subject for subject in setup.school_class.setup_subjects
+                if subject.teacher_id == setup.teacher_id
+            ],
+            'accepted_count': accepted_count,
+            'pending_count': pending_count,
+            'declined_count': declined_count,
+            'learners_url': (
+                f"{reverse('assignment_learners')}?teacher={setup.teacher_id}"
+                f"&school_class={setup.school_class_id}"
+            ),
+        })
+
+    teachers_without_setup = Teacher.objects.select_related(
+        'teacher').order_by('teacher__last_name', 'teacher__first_name')
+    if selected_teacher:
+        teachers_without_setup = teachers_without_setup.filter(
+            pk=selected_teacher.pk)
+    if selected_class:
+        teachers_without_setup = teachers_without_setup.none()
+    for teacher in teachers_without_setup:
+        if teacher.pk in setup_teacher_ids:
+            continue
+        rows.append({
+            'teacher': teacher,
+            'school_class': None,
+            'subjects': [],
+            'accepted_count': 0,
+            'pending_count': 0,
+            'declined_count': 0,
+            'learners_url': '',
+        })
+
+    configured_class_ids = TeacherClassSetup.objects.values_list(
+        'school_class_id', flat=True)
+    unmatched_learners = Student.objects.select_related(
+        'admin', 'school_class').filter(
+            Q(school_class__isnull=True)
+            | ~Q(school_class_id__in=configured_class_ids)
+        ).order_by('admin__last_name', 'admin__first_name')
+    if selected_class:
+        unmatched_learners = unmatched_learners.filter(
+            school_class=selected_class)
+
+    unconfigured_subjects = Subject.objects.filter(
+        Q(teacher__isnull=True) | Q(school_class__isnull=True)
+    ).select_related('teacher__teacher', 'school_class').order_by('name')
+    if selected_teacher:
+        unconfigured_subjects = unconfigured_subjects.filter(
+            Q(teacher=selected_teacher) | Q(teacher__isnull=True))
+    if selected_class:
+        unconfigured_subjects = unconfigured_subjects.filter(
+            school_class=selected_class)
+
+    export_format = request.GET.get('export')
+    if export_format in ('pdf', 'csv'):
+        export_rows = [[
+            row['teacher'].teacher.get_full_name()
+            or row['teacher'].teacher.username,
+            row['school_class'] or 'Not set up',
+            ', '.join(subject.name for subject in row['subjects']) or 'None',
+            row['accepted_count'],
+            row['pending_count'],
+            row['declined_count'],
+        ] for row in rows]
+        export_rows.extend([
+            [
+                'Unmatched learner',
+                learner.school_class or 'Not assigned',
+                learner.admin.get_full_name() or learner.admin.username,
+                '', '', '',
+            ] for learner in unmatched_learners
+        ])
+        export_rows.extend([
+            [
+                'Not set up subject',
+                subject.school_class or 'Not set up',
+                subject.name,
+                '', '', '',
+            ] for subject in unconfigured_subjects
+        ])
+        if export_rows:
+            return _export_data(
+                request,
+                request.user,
+                'Assignments',
+                [
+                    'Teacher / record', 'Class', 'Subjects / learner',
+                    'Accepted learners', 'Pending', 'Declined',
+                ],
+                export_rows,
+                export_format,
+                report_template='assignments',
+            )
+        messages.warning(request, 'There are no assignments to export.')
+    elif export_format:
+        return HttpResponse('Unsupported export format.', status=400)
+
+    export_query = request.GET.copy()
+    export_query.pop('export', None)
     return render(request, 'hod_template/manage_assignments.html', {
-        'learner_form': learner_form,
-        'subject_form': subject_form,
         'filter_form': filter_form,
-        'unassigned_learners': unassigned_learners,
-        'unassigned_subjects': unassigned_subjects,
-        'page_title': 'Manage Teacher Assignments',
+        'assignment_rows': rows,
+        'unmatched_learners': unmatched_learners,
+        'unconfigured_subjects': unconfigured_subjects,
+        'export_query': export_query.urlencode(),
+        'page_title': 'Assignments',
+    })
+
+
+@login_required
+@require_GET
+def assignment_learners(request):
+    teacher_id = request.GET.get('teacher', '')
+    school_class_id = request.GET.get('school_class', '')
+    teacher = get_object_or_404(Teacher, pk=teacher_id)
+    school_class = get_object_or_404(SchoolClass, pk=school_class_id)
+    accepted_requests = LearnerTeacherRequest.objects.filter(
+        teacher=teacher,
+        school_class=school_class,
+        status=LearnerTeacherRequest.ACCEPTED,
+    ).select_related('student__admin', 'student__school_class').order_by(
+        'student__admin__last_name', 'student__admin__first_name')
+    export_format = request.GET.get('export')
+    if export_format in ('pdf', 'csv'):
+        return _export_data(
+            request,
+            request.user,
+            f'Accepted Learners {school_class}',
+            ['Learner name', 'Account ID', 'Class', 'Accepted date'],
+            [[
+                item.student.admin.get_full_name()
+                or item.student.admin.username,
+                item.student.admin.username,
+                item.school_class or 'Not assigned',
+                item.responded_at or '',
+            ] for item in accepted_requests],
+            export_format,
+            report_template='accepted_learners',
+        ) or HttpResponse('No accepted learners to export.', status=404)
+    if export_format:
+        return HttpResponse('Unsupported export format.', status=400)
+    return render(request, 'hod_template/assignment_learners.html', {
+        'teacher': teacher,
+        'school_class': school_class,
+        'requests': accepted_requests,
+        'page_title': 'Accepted Learners',
     })
 
 
@@ -411,16 +800,20 @@ def manage_assignments(request):
 def reset_user_credentials(request, user_id):
     if request.user.user_type == '1':
         account = get_object_or_404(
-            CustomUser.objects.filter(user_type__in=('2', '3')),
+            CustomUser.objects.filter(
+                Q(user_type__in=('2', '3'))
+                | (Q(user_type='1') & ~Q(pk=request.user.pk))
+            ),
             pk=user_id,
         )
         allowed = True
     elif request.user.user_type == '3':
         account = CustomUser.objects.filter(
             user_type='2',
-            student__teacher__teacher=request.user,
+            student__teacher_requests__teacher__teacher=request.user,
+            student__teacher_requests__status=LearnerTeacherRequest.ACCEPTED,
             pk=user_id,
-        ).first()
+        ).distinct().first()
         if account:
             allowed = True
         else:
@@ -459,8 +852,11 @@ def reset_user_credentials(request, user_id):
             'secret': secret,
             'secret_label': secret_label,
             'return_url': reverse(
-                'manage_teachers' if account.user_type == '3'
-                else 'manage_student'),
+                {
+                    '1': 'manage_admins',
+                    '2': 'manage_student',
+                    '3': 'manage_teachers',
+                }[account.user_type]),
         })
         response['Cache-Control'] = 'no-store, no-cache, must-revalidate, private'
         response['Pragma'] = 'no-cache'
@@ -479,7 +875,6 @@ def add_teacher(request):
         data = form.cleaned_data
         with transaction.atomic():
             user = CustomUser.objects.create_user(
-                username=data['username'],
                 email='',
                 password=None,
                 user_type='3',
@@ -497,6 +892,7 @@ def add_teacher(request):
             pin,
             return_url=reverse('manage_teachers'),
             return_label='Return to teachers',
+            account_id=user.username,
         )
     return render(request, 'hod_template/edit_teacher.html', {
         'form': form,
@@ -516,7 +912,6 @@ def edit_teacher(request, teacher_id):
         data = form.cleaned_data
         user.first_name = data['first_name']
         user.last_name = data['last_name']
-        user.username = data['username']
         user.gender = data['gender']
         if data.get('profile_pic'):
             user.profile_pic = data['profile_pic']
@@ -539,126 +934,54 @@ def delete_teacher(request, teacher_id):
     return redirect(reverse('manage_teachers'))
 
 
-def attendance_records(request):
-    filter_form = TeacherGradeFilterForm(request.GET)
-    records = visible_attendance(request.user)
-    if filter_form.is_valid():
-        if filter_form.cleaned_data['teacher']:
-            records = records.filter(
-                subject__teacher=filter_form.cleaned_data['teacher'])
-        if filter_form.cleaned_data['course']:
-            records = records.filter(course=filter_form.cleaned_data['course'])
-    records = records.annotate(
-            present_count=Count(
-                'records',
-                filter=Q(records__status=True),
-            ),
-            absent_count=Count(
-                'records',
-                filter=Q(records__status=False),
-            ),
-        ).order_by('-date', 'course__name', 'subject__name')
-    page_obj = Paginator(records, 25).get_page(request.GET.get('page'))
-    return render(request, 'hod_template/attendance_records.html', {
-        'page_obj': page_obj,
-        'filter_form': filter_form,
-        'page_title': 'Attendance Records',
-    })
-
-
 @login_required
 def generate_report(request):
     if request.user.user_type not in ('1', '3'):
         return redirect(reverse('admin_home'))
 
     role = 'teacher' if request.user.user_type == '3' else 'admin'
-    bands = list(GradeBand.objects.order_by('minimum_score', 'maximum_score'))
-    if request.user.user_type == '3':
-        initial_bands = [
-            {
-                'from_score': band.minimum_score,
-                'to_score': band.maximum_score,
-                'symbol': band.symbol,
-            }
-            for band in bands[:8]
-        ]
-        if (
-            request.method == 'POST'
-            and request.POST.get('action') == 'save_grade_bands'
-        ):
-            grade_band_formset = GradeBandFormSetFactory(
-                request.POST, prefix='bands')
-            form = ReportGenerationForm(
-                role=role, user=request.user)
-            if grade_band_formset.is_valid():
-                rows = [
-                    form.cleaned_data
-                    for form in grade_band_formset.forms
-                    if form.cleaned_data.get('symbol')
-                ]
-                with transaction.atomic():
-                    GradeBand.objects.all().delete()
-                    for row in rows:
-                        GradeBand.objects.create(
-                            symbol=row['symbol'],
-                            minimum_score=row['from_score'],
-                            maximum_score=row['to_score'],
-                        )
-                messages.success(request, 'Grade bands saved successfully.')
-                gaps = _grade_band_gaps(rows)
-                if gaps:
-                    messages.warning(
-                        request,
-                        'Some score ranges are not covered: '
-                        + ', '.join(f'{start}-{end}' for start, end in gaps)
-                        + '.',
-                    )
-                return redirect(reverse('generate_report'))
-        else:
-            grade_band_formset = GradeBandFormSetFactory(
-                initial=initial_bands, prefix='bands')
-    else:
-        grade_band_formset = None
-
-    form_data = (
-        request.POST
-        if request.method == 'POST'
-        and request.POST.get('action') != 'save_grade_bands'
-        else None
-    )
     form = ReportGenerationForm(
-        form_data, role=role, user=request.user)
-    context = {
-        'form': form,
-        'grade_band_formset': grade_band_formset,
-        'grade_band_gaps': _grade_band_gaps(bands),
-        'score_maximum': settings.SIMS_MAX_TOTAL_SCORE,
-        'show_grade_band_form': bool(
-            request.method == 'POST'
-            and request.POST.get('action') == 'save_grade_bands'
-            and grade_band_formset is not None
-            and not grade_band_formset.is_valid()
-        ),
-        'page_title': 'Generate Report',
-    }
+        request.POST or None, role=role, user=request.user)
     if request.method != 'POST' or not form.is_valid():
-        return render(request, 'hod_template/generate_report.html', context)
+        return render(request, 'hod_template/generate_report.html', {
+            'form': form,
+            'page_title': 'Generate Report',
+        })
 
     report_type = form.cleaned_data['report_type']
-    course = form.cleaned_data.get('course')
+    school_class = form.cleaned_data.get('school_class')
     academic_period = form.cleaned_data.get('academic_period')
     subject = form.cleaned_data.get('subject')
 
     title, headers, rows = _report_data(
-        report_type, course, academic_period, subject, user=request.user)
-    if not rows:
-        messages.warning(
-            request, 'There is no data for the selected report options.')
-        return render(request, 'hod_template/generate_report.html', context)
-
+        report_type, school_class, academic_period, subject, user=request.user)
     export_format = request.POST.get('export_format', 'pdf')
     if export_format not in ('pdf', 'csv'):
         return HttpResponse('Unsupported export format.', status=400)
+    if not rows:
+        messages.warning(
+            request, 'There is no data for the selected report options.')
+        return render(request, 'hod_template/generate_report.html', {
+            'form': form,
+            'page_title': 'Generate Report',
+        })
+
+    preamble = []
+    postamble = []
+    if report_type == 'class_list':
+        class_teacher = (
+            request.user.get_full_name().strip() or request.user.username
+            if request.user.user_type == '3'
+            else 'Not specified')
+        preamble = [
+            f'<b>Class:</b> {escape(str(school_class))}',
+            f'<b>Academic period:</b> {escape(str(academic_period))}',
+            f'<b>Class teacher:</b> {escape(class_teacher)}',
+        ]
+        postamble = [
+            'Class teacher signature: ______________________________',
+            f'Date: {timezone.localdate():%d %B %Y}',
+        ]
     return _export_data(
         request,
         request.user,
@@ -667,37 +990,10 @@ def generate_report(request):
         rows,
         export_format,
         academic_period=academic_period,
+        preamble=preamble,
+        postamble=postamble,
+        report_template=report_type,
     )
-
-
-def _grade_band_gaps(bands):
-    maximum_score = settings.SIMS_MAX_TOTAL_SCORE
-    ordered_bands = sorted(
-        bands,
-        key=lambda band: (
-            band.minimum_score if isinstance(band, GradeBand)
-            else band['from_score'],
-            band.maximum_score if isinstance(band, GradeBand)
-            else band['to_score'],
-        ),
-    )
-    gaps = []
-    next_score = 0
-    for band in ordered_bands:
-        minimum = (
-            band.minimum_score if isinstance(band, GradeBand)
-            else band['from_score']
-        )
-        maximum = (
-            band.maximum_score if isinstance(band, GradeBand)
-            else band['to_score']
-        )
-        if minimum > next_score:
-            gaps.append((next_score, min(minimum - 1, maximum_score)))
-        next_score = max(next_score, maximum + 1)
-    if next_score <= maximum_score:
-        gaps.append((next_score, maximum_score))
-    return gaps
 
 
 @login_required
@@ -707,14 +1003,52 @@ def generate_report_card(request):
 
     form = ReportCardForm(request.POST or None, user=request.user)
     if request.method == 'POST' and form.is_valid():
+        student = form.cleaned_data['student']
+        academic_period = form.cleaned_data['academic_period']
+        if request.POST.get('action') == 'publish':
+            has_results = StudentResult.objects.filter(
+                student=student,
+                subject__teacher__teacher=request.user,
+                subject__school_class=student.school_class,
+            ).filter(
+                Q(academic_period=academic_period)
+                | Q(
+                    academic_period__isnull=True,
+                    student__academic_period=academic_period,
+                )
+            ).exists()
+            if not has_results:
+                messages.warning(
+                    request,
+                    'There are no results for this learner and academic period.',
+                )
+            else:
+                ReportCardPublication.objects.update_or_create(
+                    teacher=request.user.teacher,
+                    student=student,
+                    academic_period=academic_period,
+                    defaults={'published_at': timezone.now()},
+                )
+                messages.success(
+                    request,
+                    f'The report card for {student.admin.get_full_name()} '
+                    'has been published to the learner.',
+                )
+                return redirect(reverse('generate_report_card'))
+
         export_format = request.POST.get('export_format', 'pdf')
+        if request.POST.get('action') == 'publish':
+            return render(request, 'hod_template/generate_report_card.html', {
+                'form': form,
+                'page_title': 'Generate Learner Report Card',
+            })
         if export_format not in ('pdf', 'csv'):
             return HttpResponse('Unsupported export format.', status=400)
         response = _report_card_pdf(
             request,
             request.user,
-            form.cleaned_data['student'],
-            form.cleaned_data['academic_period'],
+            student,
+            academic_period,
             export_format=export_format,
         )
         if response is not None:
@@ -729,7 +1063,8 @@ def generate_report_card(request):
 
 
 def _report_card_pdf(
-        request, user, student, academic_period, export_format='pdf'):
+        request, user, student, academic_period, export_format='pdf',
+        actor_user=None):
     results_queryset = StudentResult.objects.filter(
         student=student,
     ).filter(
@@ -740,131 +1075,237 @@ def _report_card_pdf(
         )
     )
     if user.user_type == '3':
-        if student.teacher_id != user.teacher.pk:
+        if not student.teacher_requests.filter(
+            teacher__teacher=user,
+            status=LearnerTeacherRequest.ACCEPTED,
+        ).exists():
             return None
         results_queryset = results_queryset.filter(
-            Q(subject__teacher__teacher=user)
-            | Q(subject__teacher__isnull=True))
+            subject__teacher__teacher=user,
+            subject__school_class=student.school_class,
+        )
     results = list(results_queryset.select_related(
         'subject', 'academic_period', 'student__academic_period'
     ).order_by('subject__name'))
     if not results:
         return None
 
-    grade_bands = list(GradeBand.objects.order_by('minimum_score'))
-    test_counts = []
-    for result in results:
-        weights = get_assessment_weights(
-            result.subject, result.academic_period or academic_period)
-        test_counts.append(len(get_test_weights(weights)) or 5)
-    test_count = max(test_counts, default=1)
+    prepared_results = [prepare_result(result) for result in results]
+    assessment_columns = []
+    seen_columns = set()
+    for result in prepared_results:
+        for assessment, _ in result.assessment_values:
+            column = (
+                assessment.name,
+                str(assessment.weight),
+                str(assessment.maximum_mark),
+            )
+            if column not in seen_columns:
+                seen_columns.add(column)
+                assessment_columns.append(column)
     rows = []
     totals = []
-    for result in results:
-        weights = get_assessment_weights(
-            result.subject, result.academic_period or academic_period)
-        total = calculate_final_mark(result, weights)
-        band = get_grade_band(total, grade_bands)
-        if total is not None:
-            totals.append(total)
-        row = [result.subject.name]
-        configured_tests = get_test_weights(weights) or [
-            (f'Test {number}', None) for number in range(1, 6)
+    for result in prepared_results:
+        if result.total_score is not None:
+            totals.append(result.total_score)
+        values = {
+            (assessment.name, str(assessment.weight),
+             str(assessment.maximum_mark)): (
+                '' if score is None else f'{score:g}')
+            for assessment, score in result.assessment_values
+        }
+        teacher_user = (
+            result.subject.teacher.teacher
+            if result.subject.teacher else None)
+        initials = ''.join(
+            name[0] for name in (
+                teacher_user.get_full_name() or teacher_user.username
+            ).split() if name
+        ) if teacher_user else ''
+        row = [
+            result.subject.name,
+            *[values.get(column, '') for column in assessment_columns],
         ]
-        test_scores = get_test_scores(result, weights)
-        for number in range(test_count):
-            if number >= len(configured_tests):
-                row.append('')
-                continue
-            test_name, weight_value = configured_tests[number]
-            score = test_scores[number] if number < len(test_scores) else 0
-            weight = f'{weight_value:g}%' if weights else 'Not configured'
-            row.append(f'{score:g} / {weight}')
-        exam_weight = f'{weights.exam_weight:g}%' if weights else 'Not configured'
-        row.append(f'{result.exam:g} / {exam_weight}')
         row.extend([
-            f'{total:g}' if total is not None else 'Weights not configured',
-            band.symbol if isinstance(band, GradeBand) else band,
-            band.description if isinstance(band, GradeBand) else '',
-            band.remark if isinstance(band, GradeBand) else '',
+            f'{result.total_score:.2f}' if result.total_score is not None else 'Incomplete',
+            result.grade['symbol'] if result.grade else '-',
+            result.grade['description'] if result.grade else '',
+            initials,
         ])
         rows.append(row)
 
+    next_period = None
+    if academic_period.year and academic_period.term:
+        next_period = AcademicPeriod.objects.filter(
+            Q(year__gt=academic_period.year)
+            | Q(
+                year=academic_period.year,
+                term__gt=academic_period.term,
+            )
+        ).order_by('year', 'term').first()
+    assessment_headers = [
+        f'{name} ({Decimal(weight):g}%)'
+        for name, weight, _maximum in assessment_columns
+    ]
+    report_card_title = (
+        f'END OF TERM {academic_period.term} {academic_period.year} '
+        'LEARNER REPORT CARD'
+        if academic_period.year and academic_period.term
+        else f'END OF {academic_period} LEARNER REPORT CARD'
+    )
     return _export_data(
         request,
         user,
-        'Learner Report Card',
+        report_card_title,
         [
             'Subject',
-            *[f'Test {number} score / weight'
-              for number in range(1, test_count + 1)],
-            'Exam score / weight',
-            'Final mark',
+            *assessment_headers,
+            'Final %',
             'Grade',
-            'Description',
-            'Band remark',
+            'Comment',
+            "Teacher's initials",
         ],
         rows,
         export_format,
         academic_period=academic_period,
-        preamble=[
-            f'<b>Learner:</b> {escape(student.admin.get_full_name().strip() or student.admin.username)}',
-            f'<b>Course / grade:</b> {escape(str(student.course) if student.course else "Not assigned")}',
-            f'<b>Academic Period:</b> {escape(str(academic_period))}',
-        ],
         postamble=[
             (
-                f'<b>Overall average final mark:</b> '
+                f'<b>Overall total:</b> {sum(totals):.2f} &nbsp; '
+                f'<b>Overall average:</b> '
                 f'{sum(totals) / len(totals):.2f}'
                 if totals else
-                '<b>Overall average final mark:</b> Not calculated; '
-                'assessment weights are not configured.'
+                '<b>Overall total and average:</b> Not calculated; '
+                'no complete final marks are available.'
             ),
-            '<b>Class teacher remarks:</b>',
-            '________________________________________________________________________________',
-            '<b>Principal remarks:</b>',
-            '________________________________________________________________________________',
         ],
+        report_card={
+            'student': student,
+            'academic_period': academic_period,
+            'overall_total': sum(totals) if totals else None,
+            'overall_average': (
+                sum(totals) / len(totals) if totals else None),
+            'next_period': next_period,
+        },
+        report_template='learner_report_card',
+        audit_user=actor_user,
     )
 
 
-def _report_data(report_type, course, academic_period, subject, user=None):
+def _report_data(report_type, school_class, academic_period, subject, user=None):
     students = visible_students(user) if user else Student.objects.all()
     subjects = visible_subjects(user) if user else Subject.objects.all()
     results_queryset = visible_results(user) if user else StudentResult.objects.all()
 
     if report_type == 'school_summary':
-        courses = grade_ordered_courses().annotate(
-            learner_count=Count('student'))
-        course_rows = [[course.name, str(course.learner_count)]
-                       for course in courses]
-        unassigned_count = students.filter(course__isnull=True).count()
+        school_classes = ordered_school_classes().annotate(
+            learner_count=Count('student'),
+            boys=Count('student', filter=Q(student__admin__gender='M')),
+            girls=Count('student', filter=Q(student__admin__gender='F')),
+        )
+        class_rows = [[
+            'Learners by class',
+            str(item),
+            f'Boys: {item.boys}; girls: {item.girls}',
+            str(item.learner_count),
+        ] for item in school_classes]
+        unassigned_count = students.filter(
+            school_class__isnull=True).count()
         if unassigned_count:
-            course_rows.append(
-                ['Not assigned to a course', str(unassigned_count)])
-        if not students.exists() and not Course.objects.exists() and not subjects.exists():
+            class_rows.append([
+                'Learners by class', 'Not assigned to a class',
+                'Gender split unavailable', str(unassigned_count),
+            ])
+        if (
+            not students.exists()
+            and not SchoolClass.objects.filter(
+                grade_number__isnull=False).exists()
+            and not subjects.exists()
+        ):
             return 'School Summary', [], []
+        teacher_rows = []
+        teachers = Teacher.objects.select_related('teacher').prefetch_related(
+            'class_setups__school_class', 'subjects')
+        for teacher in teachers:
+            class_names = ', '.join(
+                str(setup.school_class)
+                for setup in teacher.class_setups.all())
+            subject_names = ', '.join(
+                f'{subject.name} ({subject.school_class or "Not set up"})'
+                for subject in teacher.subjects.all())
+            teacher_rows.append([
+                'Teacher assignments',
+                teacher.teacher.get_full_name() or teacher.teacher.username,
+                (
+                    f'Classes: {class_names or "None"}; '
+                    f'Subjects: {subject_names or "None"}'
+                ),
+                (
+                    f'Accepted: {teacher.learner_requests.filter(status=(
+                        LearnerTeacherRequest.ACCEPTED)).count()}; '
+                    f'Pending: {teacher.learner_requests.filter(status=(
+                        LearnerTeacherRequest.PENDING)).count()}'
+                ),
+            ])
+        unmatched_count = students.filter(teacher_requests__isnull=True).count()
+        current_period = AcademicPeriod.objects.filter(
+            is_current=True).first()
+        average_by_class = {}
+        result_rows = results_queryset
+        if current_period:
+            result_rows = result_rows.filter(
+                Q(academic_period=current_period)
+                | Q(
+                    academic_period__isnull=True,
+                    student__academic_period=current_period,
+                ))
+        for result in result_rows.select_related('student__school_class'):
+            prepared = prepare_result(result)
+            if prepared.total_score is None or not result.student.school_class:
+                continue
+            average_by_class.setdefault(
+                result.student.school_class, []).append(prepared.total_score)
+        average_rows = [[
+            'Average final mark',
+            str(school_class),
+            'Current academic period',
+            f'{sum(marks) / len(marks):.2f}',
+        ] for school_class, marks in average_by_class.items()]
         rows = [
-            ['Total learners', str(students.count())],
-            ['Total courses / grades', str(Course.objects.count())],
-            ['Total subjects', str(subjects.count())],
-            *course_rows,
+            ['School totals', 'Learners', 'All genders', str(students.count())],
+            ['School totals', 'Classes', '', str(school_classes.count())],
+            ['School totals', 'Subjects', '', str(subjects.count())],
+            ['School totals', 'Teachers', '', str(teachers.count())],
+            ['Learner requests', 'Unmatched learners', '', str(unmatched_count)],
+            *class_rows,
+            *teacher_rows,
+            *average_rows,
         ]
-        return 'School Summary', ['Metric / course / grade', 'Count'], rows
+        return 'School Summary', [
+            'Section', 'Class / teacher', 'Details', 'Count / value',
+        ], rows
 
     if report_type == 'class_list':
         learners = students.filter(
-            course=course, academic_period=academic_period
+            school_class=school_class, academic_period=academic_period
         ).select_related('admin').order_by('admin__last_name', 'admin__first_name')
-        rows = [[f'{learner.admin.first_name} {learner.admin.last_name}',
-                 learner.admin.username] for learner in learners]
-        return f'Class List - {course.name} - {academic_period}', [
-            'Learner name', 'Username'], rows
+        rows = [[
+            str(index),
+            f'{learner.admin.first_name} {learner.admin.last_name}',
+            learner.admin.get_gender_display(),
+            learner.admin.username,
+        ] for index, learner in enumerate(learners, 1)]
+        boys = learners.filter(admin__gender='M').count()
+        girls = learners.filter(admin__gender='F').count()
+        rows.extend([
+            ['', 'Boys total', '', str(boys)],
+            ['', 'Girls total', '', str(girls)],
+        ])
+        return f'Class List - {school_class} - {academic_period}', [
+            'No.', 'Learner name', 'Gender', 'Account ID'], rows
 
     if report_type == 'learner_results':
         results = results_queryset.filter(
-            student__course=course,
-            student__academic_period=academic_period,
+            student__school_class=school_class,
         ).filter(
             Q(academic_period=academic_period)
             | Q(
@@ -872,210 +1313,687 @@ def _report_data(report_type, course, academic_period, subject, user=None):
                 student__academic_period=academic_period,
             )
         ).filter(
-            Q(subject__course=course) | Q(subject__course__isnull=True)
+            Q(subject__school_class=school_class)
+            | Q(subject__school_class__isnull=True)
         ).select_related('student__admin', 'subject').order_by(
-            'student__admin__last_name', 'student__admin__first_name', 'subject__name')
+            '-created_at', '-pk')
         if subject:
             results = results.filter(subject=subject)
-        results = list(results)
-        grade_bands = list(GradeBand.objects.order_by('minimum_score'))
-        test_counts = []
-        for result in results:
-            weights = get_assessment_weights(result.subject, academic_period)
-            test_counts.append(len(get_test_weights(weights)) or 5)
-        test_count = max(test_counts, default=1)
-        rows = []
-        for result in results:
-            weights = get_assessment_weights(result.subject, academic_period)
-            total = calculate_final_mark(result, weights)
-            band = get_grade_band(total, grade_bands)
-            configured_tests = get_test_weights(weights) or [
-                (f'Test {number}', None) for number in range(1, 6)
-            ]
-            test_scores = get_test_scores(result, weights)
-            test_values = []
-            for number in range(test_count):
-                if number >= len(configured_tests):
-                    test_values.append('')
-                    continue
-                _, weight = configured_tests[number]
-                score = test_scores[number] if number < len(test_scores) else 0
-                test_values.append(
-                    f'{score:g} / {weight:g}%'
-                    if weights else
-                    f'{score:g} / Not configured'
-                )
-            rows.append([
-                f'{result.student.admin.first_name} {result.student.admin.last_name}',
-                result.subject.name,
-                *test_values,
-                (
-                    f'{result.exam:g} / {weights.exam_weight:g}%'
-                    if weights else f'{result.exam:g} / Not configured'
-                ),
-                f'{total:g}' if total is not None else 'Weights not configured',
-                band.symbol if isinstance(band, GradeBand) else band,
-            ])
-        return f'Learner Results - {course.name} - {academic_period}', [
-            'Learner name',
-            'Subject',
-            *[f'Test {number} score / weight'
-              for number in range(1, test_count + 1)],
-            'Exam score / weight',
-            'Final mark',
-            'Grade',
-        ], rows
-
-    if report_type == 'attendance_summary':
-        learner_queryset = students.filter(
-            course=course,
+        prepared_results = [prepare_result(result) for result in results]
+        plan = AssessmentPlan.objects.filter(
+            school_class=school_class,
+            subject=subject,
             academic_period=academic_period,
-        ).select_related('admin')
-        attendance_scope = Q(
-            attendance_records__attendance__course=course,
-            attendance_records__attendance__academic_period=academic_period,
+        ).first()
+        if plan:
+            assessments = list(plan.assessments.order_by('position', 'pk'))
+        else:
+            assessments = [
+                SimpleNamespace(
+                    pk=None, name='Test 1', weight=Decimal('50')),
+                SimpleNamespace(
+                    pk=None, name='Examination', weight=Decimal('50')),
+            ]
+        assessment_headers = [
+            f'{assessment.name} ({assessment.weight:g}%)'
+            for assessment in assessments
+        ]
+        accepted_learners = (
+            _accepted_learners_for_subject(user, school_class, subject)
+            if user and user.user_type == '3'
+            else students.filter(
+                school_class=school_class,
+            ).select_related('admin').order_by(
+                'admin__last_name', 'admin__first_name', 'admin__username')
         )
-        if user and user.user_type == '3':
-            attendance_scope &= (
-                Q(attendance_records__attendance__subject__teacher__teacher=user)
-                | Q(attendance_records__attendance__subject__teacher__isnull=True)
-            )
-        if subject:
-            attendance_scope &= Q(
-                attendance_records__attendance__subject=subject)
-        learners = learner_queryset.annotate(
-            marked_count=Count('attendance_records', filter=attendance_scope),
-            present_count=Count(
-                'attendance_records',
-                filter=attendance_scope & Q(attendance_records__status=True),
-            ),
-        ).order_by('admin__last_name', 'admin__first_name')
+        results_by_student = {}
+        for result in prepared_results:
+            results_by_student.setdefault(result.student_id, result)
         rows = []
-        for learner in learners:
-            if not learner.marked_count:
-                continue
-            absent_count = learner.marked_count - learner.present_count
-            percentage = learner.present_count / learner.marked_count * 100
+        for learner in accepted_learners:
+            result = results_by_student.get(learner.pk)
+            values = {
+                assessment.pk: score
+                for assessment, score in (
+                    result.assessment_values if result else [])
+            }
+            assessment_values = [
+                (
+                    f'{values.get(assessment.pk):g}'
+                    if values.get(assessment.pk) is not None else ''
+                )
+                for assessment in assessments
+            ]
             rows.append([
-                learner.admin.get_full_name() or learner.admin.username,
-                str(learner.present_count),
-                str(absent_count),
-                f'{percentage:.1f}%',
+                (
+                    learner.admin.get_full_name().strip()
+                    or learner.admin.username
+                ),
+                *assessment_values,
+                (
+                    f'{result.total_score:.2f}'
+                    if result and result.total_score is not None
+                    else 'Incomplete'
+                ),
+                result.grade['symbol'] if result and result.grade else '-',
             ])
-        return f'Attendance Summary - {course.name} - {academic_period}', [
-            'Learner', 'Present', 'Absent', 'Attendance'], rows
+        final_marks = [
+            result.total_score
+            for result in results_by_student.values()
+            if result.total_score is not None
+        ]
+        if final_marks:
+            rows.extend([
+                ['Class average', *([''] * len(assessments)),
+                 f'{sum(final_marks) / len(final_marks):.2f}', ''],
+                ['Highest mark', *([''] * len(assessments)),
+                 f'{max(final_marks):.2f}', ''],
+                ['Lowest mark', *([''] * len(assessments)),
+                 f'{min(final_marks):.2f}', ''],
+                [
+                    'Pass rate (50% and above)',
+                    *([''] * len(assessments)),
+                    f'{100 * sum(mark >= Decimal("50") for mark in final_marks) / len(final_marks):.2f}%',
+                    '',
+                ],
+            ])
+        grade_counts = {}
+        for result in results_by_student.values():
+            if result.grade:
+                symbol = result.grade['symbol']
+                grade_counts[symbol] = grade_counts.get(symbol, 0) + 1
+        rows.extend([
+            [
+                f'Learners with grade {grade["symbol"]}',
+                *([''] * len(assessments)),
+                str(grade_counts.get(grade['symbol'], 0)),
+                '',
+            ]
+            for grade in GRADING_SCALE
+        ])
+        return (
+            f'Results Mark Sheet - {school_class} - {subject} - '
+            f'{academic_period}',
+            ['Learner name', *assessment_headers, 'Final %', 'Grade'],
+            rows,
+        )
 
     raise ValueError(f'Unsupported report type: {report_type}')
 
 def _create_report_pdf(
         user, title, headers, rows, filename='school-report.pdf',
-        preamble=None, postamble=None):
+        preamble=None, postamble=None, report_card=None,
+        report_template='table'):
     buffer = BytesIO()
-    generated_date = date.today().strftime('%B %d, %Y')
+    generated_at = timezone.localtime(timezone.now())
     display_name = user.get_full_name().strip() or user.username
+    profile = SchoolProfile.objects.order_by('pk').first()
+    school_name = (
+        profile.school_name if profile and profile.school_name
+        else 'C. Heuva Junior Secondary School')
+    contacts = []
+    if profile:
+        contacts = [
+            value.strip() for value in (
+                profile.postal_address, profile.phone_numbers)
+            if value and value.strip()
+        ]
+    motto = profile.motto.strip() if profile and profile.motto else ''
+    logo_path = None
+    if profile and profile.logo:
+        try:
+            path = Path(profile.logo.path)
+            if path.is_file():
+                logo_path = str(path)
+        except (OSError, ValueError, NotImplementedError):
+            logger.warning('School profile logo is unavailable for PDF export.')
+    crest_path = _report_crest_path()
+    logo_path = logo_path or crest_path
     styles = getSampleStyleSheet()
+    fonts_path = Path(reportlab.__file__).parent / 'fonts'
+    regular_font = 'Helvetica'
+    bold_font = 'Helvetica-Bold'
+    try:
+        registered_fonts = pdfmetrics.getRegisteredFontNames()
+        if 'HeuvaSans' not in registered_fonts:
+            pdfmetrics.registerFont(TTFont('HeuvaSans', str(fonts_path / 'Vera.ttf')))
+            pdfmetrics.registerFont(
+                TTFont('HeuvaSans-Bold', str(fonts_path / 'VeraBd.ttf')))
+        regular_font = 'HeuvaSans'
+        bold_font = 'HeuvaSans-Bold'
+    except (OSError, ValueError):
+        logger.exception('Could not register bundled report fonts.')
     cell_style = ParagraphStyle(
-        'ReportCell', parent=styles['BodyText'], fontName='Helvetica',
+        'ReportCell', parent=styles['BodyText'], fontName=regular_font,
         fontSize=8, leading=10, spaceAfter=0)
     header_style = ParagraphStyle(
-        'ReportHeader', parent=cell_style, fontName='Helvetica-Bold',
+        'ReportHeader', parent=cell_style, fontName=bold_font,
         textColor=colors.white)
-    report_title = Paragraph(escape(title), styles['Heading2'])
+    report_title = Paragraph(
+        f'<u>{escape(title.upper())}</u>',
+        ParagraphStyle(
+            'ReportTitle', parent=styles['Heading2'],
+            fontName=bold_font, alignment=1, fontSize=16, leading=20))
     body = [report_title, Spacer(1, 5 * mm)]
-    body.extend(
-        Paragraph(line, cell_style) for line in (preamble or []))
-    if preamble:
-        body.append(Spacer(1, 3 * mm))
-    table_data = [[Paragraph(escape(str(value)), header_style) for value in headers]]
-    table_data.extend([
-        [Paragraph(escape(str(value)), cell_style) for value in row]
-        for row in rows
-    ])
-    available_width = A4[0] - 32 * mm
-    if len(headers) == 2:
-        column_widths = [available_width * 0.66, available_width * 0.34]
-    elif len(headers) == 3:
-        column_widths = [available_width * 0.56, available_width * 0.22,
-                         available_width * 0.22]
-    elif len(headers) == 4:
-        column_widths = [available_width * 0.40, available_width * 0.20,
-                         available_width * 0.20, available_width * 0.20]
-    elif len(headers) == 6:
-        column_widths = [available_width * 0.25, available_width * 0.14,
-                         available_width * 0.14, available_width * 0.12,
-                         available_width * 0.10, available_width * 0.25]
-    elif len(headers) == 7:
-        column_widths = [available_width * 0.20, available_width * 0.12,
-                         available_width * 0.12, available_width * 0.10,
-                         available_width * 0.08, available_width * 0.18,
-                         available_width * 0.20]
-    elif len(headers) >= 8:
-        column_widths = [available_width / len(headers)] * len(headers)
-    else:
-        column_widths = [available_width * 0.32, available_width * 0.25,
-                         available_width * 0.15, available_width * 0.14,
-                         available_width * 0.14]
-    table = Table(
-        table_data, colWidths=column_widths, repeatRows=1, hAlign='LEFT')
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#243b53')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#cbd2d9')),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [
-            colors.white, colors.HexColor('#f2f5f7')]),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 7),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 7),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    body.append(table)
-    body.extend(
-        Paragraph(line, cell_style) for line in (postamble or []))
     pagesize = landscape(A4) if len(headers) >= 8 else A4
+    available_width = pagesize[0] - 32 * mm
+    if report_card:
+        student = report_card['student']
+        account = student.admin
+        details = Table([
+            [
+                Paragraph('<b>Name</b>', cell_style),
+                Paragraph(escape(
+                    account.get_full_name().strip() or account.username),
+                    cell_style),
+                Paragraph('<b>Account ID</b>', cell_style),
+                Paragraph(escape(account.username or ''), cell_style),
+            ],
+            [
+                Paragraph('<b>Class</b>', cell_style),
+                Paragraph(escape(str(student.school_class or '')), cell_style),
+                Paragraph('<b>Gender</b>', cell_style),
+                Paragraph(escape(account.get_gender_display()), cell_style),
+            ],
+            [
+                Paragraph('<b>Academic period</b>', cell_style),
+                Paragraph(escape(str(report_card['academic_period'])),
+                          cell_style),
+                '', '',
+            ],
+        ], colWidths=[
+            available_width * 0.17, available_width * 0.33,
+            available_width * 0.17, available_width * 0.33,
+        ])
+        details.setStyle(TableStyle([
+            ('BOX', (0, 0), (-1, -1), 0.7, colors.HexColor('#243b53')),
+            ('INNERGRID', (0, 0), (-1, -1), 0.35,
+             colors.HexColor('#cbd2d9')),
+            ('SPAN', (1, 2), (3, 2)),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 5),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        photo = ''
+        if account.profile_pic:
+            try:
+                photo_file = Path(account.profile_pic.path)
+                if photo_file.is_file():
+                    photo = ReportImage(
+                        str(photo_file), width=25 * mm, height=32 * mm)
+            except (OSError, ValueError, NotImplementedError):
+                logger.warning('Learner photo is unavailable on report card.')
+        identity = details
+        if photo:
+            identity = Table(
+                [[photo, details]],
+                colWidths=[30 * mm, available_width - 30 * mm],
+                style=TableStyle([
+                    ('BOX', (0, 0), (0, 0), 0.7,
+                     colors.HexColor('#243b53')),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+                    ('TOPPADDING', (0, 0), (-1, -1), 4),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ]),
+            )
+        body.extend([identity, Spacer(1, 4 * mm)])
+    if preamble and not report_card:
+        body.extend(Paragraph(line, cell_style) for line in preamble)
+        body.append(Spacer(1, 3 * mm))
+    def make_table(table_headers, table_rows, proportions=None):
+        count = len(table_headers)
+        if proportions is None or len(proportions) != count:
+            proportions = [1 / count] * count
+        scale = available_width / sum(proportions)
+        column_widths = [scale * value for value in proportions]
+        table_data = [[
+            Paragraph(escape(str(value)), header_style)
+            for value in table_headers
+        ]]
+        table_data.extend([
+            [Paragraph(escape(str(value)), cell_style) for value in row]
+            for row in table_rows
+        ])
+        table = Table(
+            table_data, colWidths=column_widths, repeatRows=1,
+            hAlign='LEFT', splitByRow=1)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#243b53')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#cbd2d9')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [
+                colors.white, colors.HexColor('#f2f5f7')]),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 7),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 7),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        return table
+
+    def section_heading(text):
+        heading = ParagraphStyle(
+            'ReportSectionHeading', parent=cell_style,
+            fontName=bold_font, textColor=colors.HexColor('#243b53'),
+            fontSize=10, leading=13, spaceBefore=4 * mm, spaceAfter=2 * mm)
+        return Paragraph(escape(text), heading)
+
+    if report_template == 'school_summary' and headers:
+        sections = []
+        section_index = {}
+        for row in rows:
+            section = str(row[0])
+            if section not in section_index:
+                section_index[section] = len(sections)
+                sections.append((section, []))
+            sections[section_index[section]][1].append(row[1:])
+        for section, section_rows in sections:
+            body.extend([
+                section_heading(section),
+                make_table(headers[1:], section_rows, [0.30, 0.46, 0.24]),
+            ])
+    elif report_template == 'class_list':
+        learner_rows = [
+            row for row in rows
+            if len(row) > 1 and row[1] not in ('Boys total', 'Girls total')
+        ]
+        totals = [
+            [row[1], row[-1]] for row in rows
+            if len(row) > 1 and row[1] in ('Boys total', 'Girls total')
+        ]
+        body.append(make_table(headers, learner_rows, [0.08, 0.44, 0.20, 0.28]))
+        if totals:
+            body.extend([
+                section_heading('Class gender totals'),
+                make_table(['Category', 'Learners'], totals, [0.65, 0.35]),
+            ])
+    elif report_template == 'learner_results':
+        statistics = []
+        grade_counts = []
+        learner_rows = []
+        for row in rows:
+            label = str(row[0])
+            if label.startswith('Learners with grade '):
+                grade_counts.append([label[len('Learners with grade '):], row[-2]])
+            elif label in (
+                    'Class average', 'Highest mark', 'Lowest mark',
+                    'Pass rate (50% and above)'):
+                statistics.append([label, row[-2]])
+            else:
+                learner_rows.append(row)
+        assessment_count = max(0, len(headers) - 3)
+        assessment_width = 0.57 / assessment_count if assessment_count else 0
+        result_widths = [0.25]
+        result_widths.extend([assessment_width] * assessment_count)
+        result_widths.extend([0.13, 0.05])
+        body.append(make_table(headers, learner_rows, result_widths))
+        if statistics:
+            body.extend([
+                section_heading('Class statistics'),
+                make_table(['Measure', 'Value'], statistics, [0.65, 0.35]),
+            ])
+        if grade_counts:
+            body.extend([
+                section_heading('Learners by grade'),
+                make_table(['Grade', 'Learners'], grade_counts, [0.65, 0.35]),
+            ])
+    elif report_template == 'assignments':
+        unmatched_rows = [
+            [row[1], row[2]] for row in rows
+            if row[0] == 'Unmatched learner'
+        ]
+        unconfigured_subjects = [
+            [row[1], row[2]] for row in rows
+            if row[0] == 'Not set up subject'
+        ]
+        teacher_rows = [
+            row for row in rows
+            if row[0] not in ('Unmatched learner', 'Not set up subject')
+        ]
+        body.extend([
+            section_heading('Assignment overview'),
+            make_table(
+                ['Measure', 'Count'],
+                [
+                    ['Teacher entries', len(teacher_rows)],
+                    ['Unmatched learners', len(unmatched_rows)],
+                    ['Subjects needing setup', len(unconfigured_subjects)],
+                ],
+                [0.72, 0.28],
+            ),
+        ])
+        if teacher_rows:
+            body.extend([
+                section_heading('Teacher classes and subjects'),
+                make_table(
+                    [
+                        'Teacher', 'Class', 'Subjects', 'Accepted',
+                        'Pending', 'Declined',
+                    ],
+                    teacher_rows,
+                    [0.22, 0.12, 0.25, 0.14, 0.13, 0.14],
+                ),
+            ])
+        if unmatched_rows:
+            body.extend([
+                section_heading('Unmatched learners'),
+                make_table(
+                    ['Class', 'Learner'], unmatched_rows, [0.30, 0.70]),
+            ])
+        if unconfigured_subjects:
+            body.extend([
+                section_heading('Subjects needing setup'),
+                make_table(
+                    ['Class', 'Subject'], unconfigured_subjects,
+                    [0.30, 0.70]),
+            ])
+    elif report_template in ('activity_log', 'activity_timeline'):
+        roles = {str(row[2]) for row in rows}
+        actions = {str(row[3]) for row in rows}
+        summary_rows = [
+            ['Entries', len(rows)],
+            ['Roles represented', len(roles)],
+            ['Actions represented', len(actions)],
+        ]
+        if rows:
+            summary_rows.append([
+                'Date range',
+                f'{str(rows[-1][0])[:10]} to {str(rows[0][0])[:10]}',
+            ])
+        body.extend([
+            section_heading(
+                'User activity overview'
+                if report_template == 'activity_timeline'
+                else 'Activity overview'),
+            make_table(['Measure', 'Value'], summary_rows, [0.65, 0.35]),
+            section_heading(
+                'User activity'
+                if report_template == 'activity_timeline'
+                else 'Activity details'),
+            make_table(
+                headers, rows,
+                [0.14, 0.14, 0.08, 0.11, 0.15, 0.12, 0.18, 0.08]),
+        ])
+    elif report_template == 'learner_list':
+        class_index = headers.index('Class')
+        teachers_index = headers.index('Accepted teachers')
+        unassigned_count = sum(
+            str(row[class_index]) == 'Not assigned' for row in rows)
+        waiting_count = sum(
+            str(row[teachers_index]) == 'Waiting for a teacher'
+            for row in rows)
+        body.extend([
+            section_heading('Learner register overview'),
+            make_table(
+                ['Measure', 'Count'],
+                [
+                    ['Learners listed', len(rows)],
+                    ['Without a class', unassigned_count],
+                    ['Waiting for a teacher', waiting_count],
+                ],
+                [0.72, 0.28],
+            ),
+            section_heading('Learner register'),
+            make_table(
+                headers, rows,
+                [0.24, 0.14, 0.10, 0.18, 0.12, 0.22]),
+        ])
+    elif report_template == 'teacher_list':
+        gender_counts = {}
+        for row in rows:
+            gender = str(row[2])
+            gender_counts[gender] = gender_counts.get(gender, 0) + 1
+        body.extend([
+            section_heading('Teacher register overview'),
+            make_table(
+                ['Measure', 'Count'],
+                [
+                    ['Teachers listed', len(rows)],
+                    *[[gender, count] for gender, count in sorted(
+                        gender_counts.items())],
+                ],
+                [0.72, 0.28],
+            ),
+            section_heading('Teacher register'),
+            make_table(
+                headers, rows, [0.42, 0.28, 0.30]),
+        ])
+    elif report_template == 'accepted_learners':
+        body.extend([
+            section_heading('Accepted learners overview'),
+            make_table(
+                ['Measure', 'Count'],
+                [['Accepted learners', len(rows)]],
+                [0.72, 0.28],
+            ),
+            section_heading('Accepted learner register'),
+            make_table(
+                headers, rows, [0.32, 0.20, 0.18, 0.30]),
+        ])
+    elif report_template == 'learner_report_card':
+        assessment_count = max(0, len(headers) - 5)
+        assessment_width = 0.20 / assessment_count if assessment_count else 0
+        body.append(make_table(
+            headers,
+            rows,
+            [
+                0.19,
+                *([assessment_width] * assessment_count),
+                0.08, 0.07, 0.37, 0.09,
+            ],
+        ))
+    else:
+        body.append(make_table(headers, rows))
+    if report_card:
+        overall_total = report_card['overall_total']
+        overall_average = report_card['overall_average']
+        totals_box = Table([[
+            Paragraph(
+                '<b>Overall Total:</b> ' +
+                (f'{overall_total:.2f}' if overall_total is not None
+                 else 'Incomplete'),
+                cell_style,
+            ),
+            Paragraph(
+                '<b>Overall Average:</b> ' +
+                (f'{overall_average:.2f}' if overall_average is not None
+                 else 'Incomplete'),
+                cell_style,
+            ),
+        ]], colWidths=[available_width / 2] * 2)
+        totals_box.setStyle(TableStyle([
+            ('BOX', (0, 0), (-1, -1), 0.7, colors.HexColor('#243b53')),
+            ('INNERGRID', (0, 0), (-1, -1), 0.35,
+             colors.HexColor('#cbd2d9')),
+            ('LEFTPADDING', (0, 0), (-1, -1), 7),
+            ('TOPPADDING', (0, 0), (-1, -1), 7),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+        ]))
+        body.extend([Spacer(1, 3 * mm), totals_box, Spacer(1, 3 * mm)])
+        comment_box = Table([
+            [Paragraph('<b>Class teacher&#39;s comment</b>', cell_style)],
+            [' '],
+            [' '],
+            [Paragraph(
+                'Signature: _____________________  Date: __________',
+                cell_style)],
+            [Paragraph('<b>Principal&#39;s comment</b>', cell_style)],
+            [' '],
+            [' '],
+            [Paragraph(
+                'Signature: _____________________  Date: __________',
+                cell_style)],
+        ], colWidths=[available_width], rowHeights=[
+            7 * mm, 7 * mm, 7 * mm, 7 * mm,
+            7 * mm, 7 * mm, 7 * mm, 7 * mm,
+        ])
+        comment_box.setStyle(TableStyle([
+            ('BOX', (0, 0), (-1, -1), 0.7, colors.HexColor('#243b53')),
+            ('INNERGRID', (0, 0), (-1, -1), 0.35,
+             colors.HexColor('#cbd2d9')),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f5f7')),
+            ('BACKGROUND', (0, 4), (-1, 4), colors.HexColor('#f2f5f7')),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        next_period = report_card['next_period']
+        starts = (
+            next_period.start_year.strftime('%d %B %Y')
+            if next_period and next_period.start_year else '')
+        ends = (
+            next_period.end_year.strftime('%d %B %Y')
+            if next_period and next_period.end_year else '')
+        grading_rows = [[
+            Paragraph('<b>Grade</b>', header_style),
+            Paragraph('<b>Scale</b>', header_style),
+            Paragraph('<b>Description</b>', header_style),
+            Paragraph('<b>US grade</b>', header_style),
+        ]]
+        grading_rows.extend([
+            [
+                grade['symbol'],
+                f'{grade["minimum"]:.2f}-{grade["maximum"]:.2f}',
+                grade['description'],
+                grade['us_grade'],
+            ]
+            for grade in GRADING_SCALE
+        ])
+        grading_key = Table(
+            grading_rows,
+            colWidths=[
+                available_width * 0.14,
+                available_width * 0.25,
+                available_width * 0.39,
+                available_width * 0.22,
+            ],
+            repeatRows=1,
+            splitByRow=1,
+        )
+        grading_key.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#243b53')),
+            ('GRID', (0, 0), (-1, -1), 0.35, colors.HexColor('#cbd2d9')),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [
+                colors.white, colors.HexColor('#f2f5f7')]),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 5),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+        ]))
+        body.extend([
+            comment_box,
+            Spacer(1, 3 * mm),
+            Paragraph(
+                f'<b>Next term begins on:</b> {escape(starts)}'
+                f' &nbsp;&nbsp; <b>Ends on:</b> {escape(ends)}',
+                cell_style),
+            Spacer(1, 3 * mm),
+            grading_key,
+            Spacer(1, 3 * mm),
+            Paragraph(
+                '<font color="#b00020"><b>This report is invalid without '
+                'a valid school stamp</b></font>',
+                ParagraphStyle(
+                    'StampNotice', parent=cell_style, alignment=1,
+                    fontSize=9, leading=11)),
+        ])
+    if postamble and not report_card:
+        body.extend(Paragraph(line, cell_style) for line in postamble)
     document = SimpleDocTemplate(
         buffer, pagesize=pagesize, rightMargin=16 * mm, leftMargin=16 * mm,
-        topMargin=42 * mm, bottomMargin=22 * mm,
+        topMargin=48 * mm, bottomMargin=25 * mm,
         title=title, author=display_name)
-    crest_path = _report_crest_path()
 
     def draw_page(canvas, doc):
         canvas.saveState()
         page_width, page_height = pagesize
-        if doc.page == 1 and crest_path:
+        if crest_path:
             try:
+                if hasattr(canvas, 'setFillAlpha'):
+                    canvas.setFillAlpha(0.07)
                 canvas.drawImage(
                     crest_path,
-                    16 * mm,
-                    page_height - 27 * mm,
-                    width=20 * mm,
-                    height=20 * mm,
+                    page_width / 2 - 35 * mm,
+                    page_height / 2 - 35 * mm,
+                    width=70 * mm,
+                    height=70 * mm,
                     preserveAspectRatio=True,
                     anchor='c',
                     mask='auto',
                 )
+                if hasattr(canvas, 'setFillAlpha'):
+                    canvas.setFillAlpha(1)
             except (OSError, ValueError) as error:
-                logger.warning('Could not embed report crest at %s: %s',
+                logger.warning('Could not draw report watermark at %s: %s',
                                crest_path, error)
+        if logo_path:
+            try:
+                canvas.drawImage(
+                    logo_path, 16 * mm, page_height - 30 * mm,
+                    width=19 * mm, height=19 * mm,
+                    preserveAspectRatio=True, anchor='c', mask='auto')
+            except (OSError, ValueError) as error:
+                logger.warning('Could not draw report logo at %s: %s',
+                               logo_path, error)
         canvas.setFillColor(colors.HexColor('#243b53'))
-        canvas.setFont('Helvetica-Bold', 13)
-        canvas.drawCentredString(
-            page_width / 2, page_height - 15 * mm,
-            'C. Heuva Junior Secondary School')
+        canvas.setFont('Times-Bold', 15)
+        canvas.drawCentredString(page_width / 2, page_height - 15 * mm,
+                                 school_name[:100])
+        canvas.setFont(regular_font, 8)
+        header_y = page_height - 20 * mm
+        for contact in contacts:
+            canvas.drawCentredString(page_width / 2, header_y, contact[:140])
+            header_y -= 4 * mm
+        if motto:
+            canvas.drawCentredString(page_width / 2, header_y, motto[:140])
+            canvas.line(page_width / 2 - 30 * mm, header_y - 1 * mm,
+                        page_width / 2 + 30 * mm, header_y - 1 * mm)
         canvas.setStrokeColor(colors.HexColor('#cbd2d9'))
-        canvas.line(16 * mm, page_height - 29 * mm,
-                    page_width - 16 * mm, page_height - 29 * mm)
-        canvas.setFont('Helvetica', 8)
+        canvas.line(16 * mm, page_height - 36 * mm,
+                    page_width - 16 * mm, page_height - 36 * mm)
+        canvas.setFont(regular_font, 8)
         canvas.setFillColor(colors.HexColor('#52606d'))
-        canvas.drawString(16 * mm, page_height - 35 * mm,
-                          f'Date generated: {generated_date}')
+        canvas.drawString(
+            16 * mm, page_height - 42 * mm,
+            f'Generated: {generated_at:%d %B %Y %H:%M} by {display_name}')
         canvas.line(16 * mm, 16 * mm, page_width - 16 * mm, 16 * mm)
-        canvas.drawString(16 * mm, 10 * mm, f'Generated by {display_name}')
-        canvas.drawRightString(
-            page_width - 16 * mm, 10 * mm, f'Page {doc.page}')
         canvas.restoreState()
 
-    document.build(body, onFirstPage=draw_page, onLaterPages=draw_page)
+    from reportlab.pdfgen.canvas import Canvas
+
+    def numbered_canvas(*args, **kwargs):
+        class NumberedCanvas(Canvas):
+            def __init__(self, *canvas_args, **canvas_kwargs):
+                super().__init__(*canvas_args, **canvas_kwargs)
+                self.saved_page_states = []
+
+            def showPage(self):
+                self.saved_page_states.append(dict(self.__dict__))
+                self._startPage()
+
+            def save(self):
+                total_pages = len(self.saved_page_states)
+                for state in self.saved_page_states:
+                    self.__dict__.update(state)
+                    self.setFont(regular_font, 8)
+                    self.setFillColor(colors.HexColor('#52606d'))
+                    self.drawRightString(
+                        pagesize[0] - 16 * mm,
+                        10 * mm,
+                        f'Page {self._pageNumber} of {total_pages}')
+                    Canvas.showPage(self)
+                Canvas.save(self)
+
+        return NumberedCanvas(*args, **kwargs)
+
+    document.build(
+        body,
+        onFirstPage=draw_page,
+        onLaterPages=draw_page,
+        canvasmaker=numbered_canvas,
+    )
     response = HttpResponse(buffer.getvalue(), content_type='application/pdf')
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
@@ -1083,7 +2001,8 @@ def _create_report_pdf(
 
 def _export_data(
         request, user, title, headers, rows, export_format,
-        academic_period=None, preamble=None, postamble=None):
+        academic_period=None, preamble=None, postamble=None,
+        report_card=None, report_template='table', audit_user=None):
     if not rows:
         return None
     if export_format not in ('pdf', 'csv'):
@@ -1106,6 +2025,8 @@ def _export_data(
             filename=filename,
             preamble=preamble,
             postamble=postamble,
+            report_card=report_card,
+            report_template=report_template,
         )
     else:
         response = HttpResponse(
@@ -1114,15 +2035,102 @@ def _export_data(
             f'attachment; filename="{filename}"')
         response.write('\ufeff')
         writer = csv.writer(response)
+        profile = SchoolProfile.objects.order_by('pk').first()
+        school_name = (
+            profile.school_name if profile and profile.school_name
+            else 'C. Heuva Junior Secondary School')
+        generated_at = timezone.localtime(timezone.now())
+        writer.writerow([_csv_safe(school_name)])
+        writer.writerow([_csv_safe(title)])
+        writer.writerow([_csv_safe(
+            f'Generated: {generated_at:%d %B %Y %H:%M} by '
+            f'{user.get_full_name().strip() or user.username}')])
+        if profile:
+            for label, value in (
+                ('Postal address', profile.postal_address),
+                ('Phone numbers', profile.phone_numbers),
+                ('Motto', profile.motto),
+            ):
+                if value and value.strip():
+                    writer.writerow([_csv_safe(label), _csv_safe(value)])
+        writer.writerow([])
+        if preamble:
+            writer.writerows([
+                [_csv_safe(unescape(re.sub(r'<[^>]+>', '', line)))]
+                for line in preamble
+            ])
+            writer.writerow([])
+        if report_card:
+            student = report_card['student']
+            writer.writerow([
+                _csv_safe('Learner'),
+                _csv_safe(
+                    student.admin.get_full_name().strip()
+                    or student.admin.username),
+            ])
+            writer.writerow([
+                _csv_safe('Account ID'), _csv_safe(student.admin.username)])
+            writer.writerow([
+                _csv_safe('Class'),
+                _csv_safe(student.school_class or 'Not assigned')])
+            writer.writerow([
+                _csv_safe('Gender'),
+                _csv_safe(student.admin.get_gender_display())])
+            writer.writerow([
+                _csv_safe('Academic period'),
+                _csv_safe(report_card['academic_period'])])
+            writer.writerow([])
         writer.writerow([_csv_safe(value) for value in headers])
         writer.writerows([
             [_csv_safe(value) for value in row]
             for row in rows
         ])
+        if postamble and not report_card:
+            writer.writerow([])
+            writer.writerows([
+                [unescape(re.sub(r'<[^>]+>', '', line))]
+                for line in postamble
+            ])
+        if report_card:
+            writer.writerow([])
+            writer.writerow([
+                'Overall Total',
+                report_card['overall_total']
+                if report_card['overall_total'] is not None
+                else 'Incomplete',
+            ])
+            writer.writerow([
+                'Overall Average',
+                report_card['overall_average']
+                if report_card['overall_average'] is not None
+                else 'Incomplete',
+            ])
+            next_period = report_card['next_period']
+            writer.writerow([
+                'Next term begins on',
+                next_period.start_year if next_period else '',
+            ])
+            writer.writerow([
+                'Ends on',
+                next_period.end_year if next_period else '',
+            ])
+            writer.writerow([])
+            writer.writerow([
+                'Grade', 'Scale', 'Description', 'US grade'])
+            writer.writerows([
+                [
+                    grade['symbol'],
+                    f'{grade["minimum"]:.2f}-{grade["maximum"]:.2f}',
+                    grade['description'],
+                    grade['us_grade'],
+                ]
+                for grade in GRADING_SCALE
+            ])
 
+    log_actor = audit_user or user
     ActivityLog.objects.create(
-        actor=user,
-        actor_username=user.get_username() or '',
+        actor=log_actor,
+        actor_username=log_actor.get_username() or '',
         action='export',
         object_type='data_export',
         object_id='',
@@ -1169,7 +2177,6 @@ def add_student(request):
             first_name = student_form.cleaned_data.get('first_name')
             last_name = student_form.cleaned_data.get('last_name')
             address = student_form.cleaned_data.get('address')
-            username = student_form.cleaned_data.get('username')
             gender = student_form.cleaned_data.get('gender')
             password = student_form.cleaned_data.get('password')
             passport = request.FILES.get('profile_pic')
@@ -1180,7 +2187,6 @@ def add_student(request):
                 passport_url = fs.url(filename)
             with transaction.atomic():
                 user = CustomUser.objects.create_user(
-                    username=username,
                     email='',
                     password=password,
                     user_type='2',
@@ -1191,48 +2197,22 @@ def add_student(request):
                     profile_pic=passport_url,
                 )
                 student = user.student
-                student.course = student_form.cleaned_data.get('course')
+                student.school_class = school_class_from_label(
+                    student_form.cleaned_data.get('grade_and_class'))
                 student.academic_period = student_form.cleaned_data.get('academic_period')
+                accepting_teacher = None
                 if request.user.user_type == '3':
-                    teacher = teacher_profile(request.user)
-                    student.teacher = teacher
-                    student.created_by = teacher
+                    accepting_teacher = teacher_profile(request.user)
+                    student.created_by = accepting_teacher
                 student.save()
+                create_class_requests(
+                    student, accepted_teacher=accepting_teacher)
             messages.success(request, 'Learner account added successfully.')
             return redirect(reverse('manage_student'))
         else:
             messages.error(request, "Could Not Add: ")
     return _render_manage_students(
         request, student_form=student_form, open_modal='addStudentModal')
-
-
-def add_subject(request):
-    if request.method != 'POST':
-        return redirect(reverse('manage_subject'))
-
-    form = SubjectForm(request.POST or None, user=request.user)
-    context = {
-        'form': form,
-        'page_title': 'Add Subject'
-    }
-    if request.method == 'POST':
-        if form.is_valid():
-            try:
-                subject = form.save(commit=False)
-                if request.user.user_type == '3':
-                    teacher = teacher_profile(request.user)
-                    subject.teacher = teacher
-                    subject.created_by = teacher
-                subject.save()
-                messages.success(request, "Successfully Added")
-                return redirect(reverse('manage_subject'))
-
-            except Exception as e:
-                messages.error(request, "Could Not Add " + str(e))
-        else:
-            messages.error(request, "Fill Form Properly")
-
-    return _render_manage_subjects(request, form=form, open_modal=True)
 
 
 def _render_manage_students(request, student_form=None, open_modal=None):
@@ -1247,17 +2227,35 @@ def _render_manage_students(request, student_form=None, open_modal=None):
     if request.user.user_type == '1' and filter_form.is_valid():
         if filter_form.cleaned_data['teacher']:
             students = students.filter(
-                teacher=filter_form.cleaned_data['teacher'])
-        if filter_form.cleaned_data['course']:
+                teacher_requests__teacher=filter_form.cleaned_data['teacher'],
+                teacher_requests__status=LearnerTeacherRequest.ACCEPTED,
+            ).distinct()
+        if filter_form.cleaned_data['school_class']:
             students = students.filter(
-                course=filter_form.cleaned_data['course'])
+                school_class=filter_form.cleaned_data['school_class'])
+    search_query = request.GET.get('search', '').strip()
+    if search_query:
+        students = students.filter(
+            Q(admin__first_name__icontains=search_query)
+            | Q(admin__last_name__icontains=search_query)
+            | Q(admin__username__icontains=search_query)
+        )
     learner_accounts = CustomUser.objects.filter(
         pk__in=students.values('admin_id')).select_related(
-            'student__teacher__teacher',
             'student__created_by__teacher',
-            'student__course',
+            'student__school_class',
             'student__academic_period',
     ).order_by('last_name', 'first_name')
+    for account in learner_accounts:
+        account.accepted_teacher_names = list(
+            account.student.teacher_requests.filter(
+                status=LearnerTeacherRequest.ACCEPTED,
+            ).select_related('teacher__teacher').values_list(
+                'teacher__teacher__first_name',
+                'teacher__teacher__last_name',
+                'teacher__teacher__username',
+            )
+        )
     export_query_params = request.GET.copy()
     export_query_params.pop('export', None)
     export_query_params.pop('page', None)
@@ -1267,9 +2265,13 @@ def _render_manage_students(request, student_form=None, open_modal=None):
             account.get_full_name() or account.username,
             account.username,
             account.get_gender_display(),
-            account.student.course or 'Not assigned',
+            account.student.school_class or 'Not assigned',
             account.student.academic_period or 'Not assigned',
-            account.student.teacher or 'Unassigned',
+            ', '.join(
+                ' '.join(filter(None, (first_name, last_name))) or username
+                for first_name, last_name, username
+                in account.accepted_teacher_names
+            ) or 'Waiting for a teacher',
         ] for account in learner_accounts]
         if not rows:
             messages.warning(request, 'No learners are available to export.')
@@ -1279,11 +2281,12 @@ def _render_manage_students(request, student_form=None, open_modal=None):
                 request.user,
                 'Learner List',
                 [
-                    'Learner name', 'Username', 'Gender', 'Course / grade',
-                    'Academic Period', 'Assigned teacher',
+                    'Learner name', 'Account ID', 'Gender', 'Class',
+                    'Academic Period', 'Accepted teachers',
                 ],
                 rows,
                 export_format,
+                report_template='learner_list',
             )
     elif export_format:
         return HttpResponse('Unsupported export format.', status=400)
@@ -1293,42 +2296,108 @@ def _render_manage_students(request, student_form=None, open_modal=None):
         'student_form': student_form,
         'filter_form': filter_form,
         'open_modal': open_modal,
+        'search_query': search_query,
         'export_query_params': export_query_params.urlencode(),
         'page_title': 'Manage Learners',
     }
     return render(request, "hod_template/manage_student.html", context)
 
 
-def _render_manage_subjects(request, form=None, open_modal=False, read_only=False):
-    if form is None:
-        form = SubjectForm(user=request.user)
-    filter_form = TeacherGradeFilterForm(request.GET)
-    subjects = visible_subjects(request.user)
-    if request.user.user_type == '1' and filter_form.is_valid():
-        if filter_form.cleaned_data['teacher']:
-            subjects = subjects.filter(
-                teacher=filter_form.cleaned_data['teacher'])
-        if filter_form.cleaned_data['course']:
-            subjects = subjects.filter(
-                course=filter_form.cleaned_data['course'])
-    for subject in subjects:
-        subject.editable = (
-            request.user.user_type == '1'
-            or subject.teacher_id == request.user.teacher.pk
-        )
-    context = {
-        'subjects': subjects,
-        'form': form,
-        'filter_form': filter_form,
-        'open_modal': open_modal,
-        'read_only': False,
-        'page_title': 'Manage Subjects',
-    }
-    return render(request, "hod_template/manage_subject.html", context)
-
-
 def manage_student(request):
     return _render_manage_students(request)
+
+
+def _render_learner_import_page(
+    request,
+    upload_form=None,
+    options_form=None,
+    preview_batch=None,
+    import_batch=None,
+):
+    if upload_form is None:
+        upload_form = LearnerImportUploadForm()
+    if options_form is None:
+        options_form = LearnerImportOptionsForm(user=request.user)
+    if import_batch is None:
+        import_batch = LearnerImportBatch.objects.filter(
+            created_by=request.user,
+            status__in=(
+                LearnerImportBatch.PROCESSING,
+                LearnerImportBatch.FAILED,
+            ),
+        ).first()
+        if import_batch is None:
+            import_batch = LearnerImportBatch.objects.filter(
+                created_by=request.user,
+                status=LearnerImportBatch.COMPLETED,
+                credentials_acknowledged_at__isnull=True,
+            ).first()
+    preview_rows = preview_batch.rows if preview_batch else []
+    return render(request, 'hod_template/import_learners.html', {
+        'upload_form': upload_form,
+        'options_form': options_form,
+        'preview_batch': preview_batch,
+        'preview_rows': preview_rows,
+        'preview_has_errors': any(
+            row['errors'] for row in preview_rows),
+        'import_batch': import_batch,
+        'max_rows': settings.SIMS_LEARNER_IMPORT_MAX_ROWS,
+        'page_title': 'Import Learners',
+    })
+
+
+def _recover_legacy_learner_preview(request):
+    preview = request.session.pop('learner_import_preview', None)
+    if not preview:
+        return None
+
+    rows = preview.get('rows', [])
+    try:
+        is_expired = (
+            timezone.now().timestamp()
+            - float(preview.get('created_at', 0)) > 900)
+    except (TypeError, ValueError):
+        is_expired = True
+    if (
+        is_expired
+        or not rows
+        or len(rows) > settings.SIMS_LEARNER_IMPORT_MAX_ROWS
+    ):
+        messages.warning(
+            request,
+            'The interrupted learner preview expired. Upload the file again '
+            'to start a new import.',
+        )
+        return None
+
+    account_ids = [
+        row.get('data', {}).get('account_id')
+        for row in rows
+        if row.get('data', {}).get('account_id')
+    ]
+    existing_ids = set(CustomUser.objects.filter(
+        username__in=account_ids).values_list('username', flat=True))
+    if existing_ids:
+        messages.error(
+            request,
+            'Some account IDs in the interrupted preview already exist. '
+            'Review Manage Learners before importing the file again; this '
+            'preview was not resumed to avoid duplicate accounts.',
+        )
+        return None
+
+    batch = LearnerImportBatch.objects.create(
+        created_by=request.user,
+        rows=rows,
+        total_rows=len(rows),
+        status=LearnerImportBatch.PREVIEW,
+    )
+    messages.info(
+        request,
+        f'Recovered the interrupted preview ({len(rows)} learner rows). '
+        'Review it below to continue.',
+    )
+    return batch
 
 
 @login_required
@@ -1336,8 +2405,6 @@ def import_learners(request):
     if request.user.user_type not in ('1', '3'):
         return redirect(reverse('login_page'))
 
-    upload_form = LearnerImportUploadForm()
-    options_form = LearnerImportOptionsForm(user=request.user)
     if request.method == 'POST' and request.POST.get('action') == 'upload':
         request.session.pop('learner_import_preview', None)
         upload_form = LearnerImportUploadForm(request.POST, request.FILES)
@@ -1348,118 +2415,313 @@ def import_learners(request):
             except LearnerImportError as error:
                 upload_form.add_error('file', str(error))
             else:
-                token = secrets.token_urlsafe(24)
-                request.session['learner_import_preview'] = {
-                    'token': token,
-                    'created_at': timezone.now().timestamp(),
-                    'rows': preview_rows,
-                }
-                options_form = LearnerImportOptionsForm(user=request.user)
-                return render(request, 'hod_template/import_learners.html', {
-                    'upload_form': LearnerImportUploadForm(),
-                    'options_form': options_form,
-                    'preview_rows': preview_rows,
-                    'preview_token': token,
-                    'preview_has_errors': any(
-                        row['errors'] for row in preview_rows),
-                    'max_rows': settings.SIMS_LEARNER_IMPORT_MAX_ROWS,
-                    'page_title': 'Import Learners',
-                })
+                batch = LearnerImportBatch.objects.create(
+                    created_by=request.user,
+                    rows=preview_rows,
+                    total_rows=len(preview_rows),
+                    status=LearnerImportBatch.PREVIEW,
+                )
+                return _render_learner_import_page(
+                    request,
+                    preview_batch=batch,
+                )
+        return _render_learner_import_page(
+            request,
+            upload_form=upload_form,
+        )
 
     if request.method == 'POST' and request.POST.get('action') == 'confirm':
-        preview = request.session.get('learner_import_preview')
-        supplied_token = request.POST.get('preview_token', '')
-        if (
-            not preview
-            or timezone.now().timestamp() - preview.get('created_at', 0) > 900
-            or not secrets.compare_digest(
-                preview.get('token', ''), supplied_token)
-        ):
-            request.session.pop('learner_import_preview', None)
-            messages.error(
-                request,
+        batch = get_object_or_404(
+            LearnerImportBatch,
+            token=request.POST.get('import_token'),
+            created_by=request.user,
+            status=LearnerImportBatch.PREVIEW,
+        )
+        if timezone.now() - batch.created_at > timedelta(minutes=15):
+            batch.status = LearnerImportBatch.FAILED
+            batch.error_message = (
                 'This import preview expired. Upload the file again.')
+            batch.save(update_fields=['status', 'error_message', 'updated_at'])
+            messages.error(request, batch.error_message)
             return redirect(reverse('import_learners'))
 
         options_form = LearnerImportOptionsForm(
             request.POST, user=request.user)
-        preview_rows = validate_learner_rows(preview['rows'])
-        request.session['learner_import_preview']['rows'] = preview_rows
+        preview_rows = validate_learner_rows(batch.rows)
+        batch.rows = preview_rows
+        batch.save(update_fields=['rows', 'updated_at'])
         if options_form.is_valid() and not any(
             row['errors'] for row in preview_rows
         ):
-            period = options_form.cleaned_data.get('academic_period')
-            teacher = (
-                options_form.cleaned_data.get('teacher')
-                if request.user.user_type == '1'
-                else teacher_profile(request.user)
+            batch.academic_period = options_form.cleaned_data[
+                'academic_period']
+            batch.teacher = (
+                teacher_profile(request.user)
+                if request.user.user_type == '3' else None
             )
-            created_by = (
-                teacher if request.user.user_type == '3' else None)
-            credentials = []
-            with transaction.atomic():
-                for row in preview_rows:
-                    data = row['data']
-                    password = secrets.token_urlsafe(16)
-                    user = CustomUser.objects.create_user(
-                        username=data['username'],
-                        password=password,
-                        user_type='2',
-                        first_name=data['first_name'],
-                        last_name=data['last_name'],
-                        gender=data['gender'],
-                        email='',
-                        address='',
-                    )
-                    student = user.student
-                    student.course_id = data['course_id']
-                    student.academic_period = period
-                    student.teacher = teacher
-                    student.created_by = created_by
-                    student.save()
-                    credentials.append({
-                        'name': user.get_full_name() or user.username,
-                        'username': user.username,
-                        'password': password,
-                    })
+            batch.status = LearnerImportBatch.PROCESSING
+            batch.save(update_fields=[
+                'academic_period',
+                'teacher',
+                'status',
+                'updated_at',
+            ])
+            return _render_learner_import_page(
+                request,
+                import_batch=batch,
+            )
+        return _render_learner_import_page(
+            request,
+            options_form=options_form,
+            preview_batch=batch,
+        )
 
+    preview_batch = _recover_legacy_learner_preview(request)
+    if preview_batch is None:
+        preview_batch = LearnerImportBatch.objects.filter(
+            created_by=request.user,
+            status=LearnerImportBatch.PREVIEW,
+        ).first()
+        if (
+            preview_batch
+            and timezone.now() - preview_batch.created_at
+            > timedelta(minutes=15)
+        ):
+            preview_batch.status = LearnerImportBatch.FAILED
+            preview_batch.error_message = (
+                'This import preview expired. Upload the file again.')
+            preview_batch.save(update_fields=[
+                'status', 'error_message', 'updated_at',
+            ])
+            preview_batch = None
+            messages.warning(
+                request,
+                'The learner preview expired. Upload the file again.',
+            )
+    return _render_learner_import_page(
+        request,
+        preview_batch=preview_batch,
+    )
+
+
+def _learner_import_batch_for_user(request, token):
+    if request.user.user_type not in ('1', '3'):
+        return None
+    return get_object_or_404(
+        LearnerImportBatch,
+        token=token,
+        created_by=request.user,
+    )
+
+
+@login_required
+@require_GET
+def learner_import_status(request, token):
+    batch = _learner_import_batch_for_user(request, token)
+    if batch is None:
+        return HttpResponseForbidden('Staff access is required.')
+    return JsonResponse({
+        'status': batch.status,
+        'recorded': batch.imported_rows,
+        'total': batch.total_rows,
+        'error': batch.error_message,
+    })
+
+
+@login_required
+@require_POST
+def process_learner_import(request, token):
+    batch = _learner_import_batch_for_user(request, token)
+    if batch is None:
+        return HttpResponseForbidden('Staff access is required.')
+    if batch.status != LearnerImportBatch.PROCESSING:
+        return JsonResponse({
+            'status': batch.status,
+            'recorded': batch.imported_rows,
+            'total': batch.total_rows,
+            'error': batch.error_message,
+        })
+
+    try:
+        with transaction.atomic():
+            batch = LearnerImportBatch.objects.select_for_update().get(
+                pk=batch.pk)
+            if batch.status != LearnerImportBatch.PROCESSING:
+                return JsonResponse({
+                    'status': batch.status,
+                    'recorded': batch.imported_rows,
+                    'total': batch.total_rows,
+                    'error': batch.error_message,
+                })
+
+            first_index = batch.imported_rows
+            end_index = min(
+                first_index + LEARNER_IMPORT_CHUNK_SIZE,
+                batch.total_rows,
+            )
+            class_cache = {}
+            for row_index in range(first_index, end_index):
+                row = batch.rows[row_index]
+                data = row['data']
+                account_id = data['account_id']
+                user = CustomUser.objects.create_user(
+                    username=account_id,
+                    password=learner_import_password(
+                        batch.token, row_index),
+                    user_type='2',
+                    first_name=data['first_name'],
+                    last_name=data['last_name'],
+                    gender=data['gender'],
+                    email='',
+                    address='',
+                )
+                student = user.student
+                class_label = data['class_name']
+                if class_label not in class_cache:
+                    class_cache[class_label] = school_class_from_label(
+                        class_label)
+                student.school_class = class_cache[class_label]
+                student.academic_period = batch.academic_period
+                student.created_by = batch.teacher
+                student.save()
+                create_class_requests(
+                    student,
+                    accepted_teacher=(
+                        batch.teacher
+                        if request.user.user_type == '3' else None
+                    ),
+                )
+
+            batch.imported_rows = end_index
+            if batch.imported_rows == batch.total_rows:
+                batch.status = LearnerImportBatch.COMPLETED
                 ActivityLog.objects.create(
                     actor=request.user,
                     actor_username=request.user.get_username() or '',
                     action='import',
                     object_type='learner_import',
-                    description=f'Imported {len(credentials)} learners.',
-                    changes={'row_count': len(credentials)},
+                    description=(
+                        f'Imported {batch.total_rows} learners.'),
+                    changes={'row_count': batch.total_rows},
                     ip_address=request.META.get('REMOTE_ADDR'),
                 )
-            request.session.pop('learner_import_preview', None)
-            response = render(
-                request,
-                'hod_template/import_learner_credentials.html',
-                {
-                    'credentials': credentials,
-                    'page_title': 'Learner Import Complete',
-                },
-            )
-            response['Cache-Control'] = (
-                'no-store, no-cache, must-revalidate, private')
-            response['Pragma'] = 'no-cache'
-            return response
+            batch.save(update_fields=[
+                'imported_rows', 'status', 'updated_at',
+            ])
+    except OperationalError:
+        logger.warning(
+            'Database busy while processing learner import %s at row %s.',
+            token,
+            batch.imported_rows + 1,
+            exc_info=True,
+        )
+        batch.refresh_from_db()
+        return JsonResponse({
+            'status': batch.status,
+            'recorded': batch.imported_rows,
+            'total': batch.total_rows,
+            'error': (
+                'The database is busy. This batch was not recorded; '
+                'previously saved learners are safe. Resume the import '
+                'when the connection is available.'
+            ),
+        }, status=503)
+    except IntegrityError:
+        logger.exception(
+            'Integrity error while processing learner import %s at row %s.',
+            token,
+            batch.imported_rows + 1,
+        )
+        batch.refresh_from_db()
+        batch.status = LearnerImportBatch.FAILED
+        batch.error_message = (
+            'The current batch could not be saved because one or more '
+            'account IDs conflict with existing records. No learners from '
+            'this batch were added; previously saved learners are safe. '
+            'Review the account IDs before uploading again.'
+        )
+        batch.save(update_fields=['status', 'error_message', 'updated_at'])
+        return JsonResponse({
+            'status': batch.status,
+            'recorded': batch.imported_rows,
+            'total': batch.total_rows,
+            'error': batch.error_message,
+        }, status=409)
 
-    preview = request.session.get('learner_import_preview')
-    preview_rows = preview.get('rows', []) if preview else []
-    preview_token = preview.get('token', '') if preview else ''
-    context = {
-        'upload_form': upload_form,
-        'options_form': options_form,
-        'preview_rows': preview_rows,
-        'preview_token': preview_token,
-        'preview_has_errors': any(
-            row['errors'] for row in preview_rows),
-        'max_rows': settings.SIMS_LEARNER_IMPORT_MAX_ROWS,
-        'page_title': 'Import Learners',
-    }
-    return render(request, 'hod_template/import_learners.html', context)
+    return JsonResponse({
+        'status': batch.status,
+        'recorded': batch.imported_rows,
+        'total': batch.total_rows,
+        'error': batch.error_message,
+    })
+
+
+@login_required
+@require_http_methods(['GET', 'POST'])
+def complete_learner_import(request, token):
+    batch = _learner_import_batch_for_user(request, token)
+    if batch is None:
+        return HttpResponseForbidden('Staff access is required.')
+    if request.method == 'POST':
+        if batch.status != LearnerImportBatch.COMPLETED:
+            return redirect(reverse('import_learners'))
+        batch.credentials_acknowledged_at = timezone.now()
+        batch.rows = []
+        batch.save(update_fields=[
+            'credentials_acknowledged_at', 'rows', 'updated_at',
+        ])
+        messages.success(
+            request,
+            'The one-time learner credentials have been hidden.',
+        )
+        return redirect(reverse('import_learners'))
+    if (
+        batch.status != LearnerImportBatch.COMPLETED
+        or batch.credentials_acknowledged_at is not None
+    ):
+        return redirect(reverse('import_learners'))
+
+    account_ids = [
+        row['data']['account_id'] for row in batch.rows
+    ]
+    accounts = CustomUser.objects.in_bulk(
+        account_ids, field_name='username')
+    credentials = []
+    for row_index, row in enumerate(batch.rows):
+        account_id = row['data']['account_id']
+        account = accounts.get(account_id)
+        if account is None:
+            messages.error(
+                request,
+                'Learner credentials could not be retrieved. Contact an '
+                'administrator before importing this file again.',
+            )
+            return redirect(reverse('import_learners'))
+        credentials.append({
+            'name': account.get_full_name() or account.username,
+            'account_id': account.username,
+            'password': learner_import_password(batch.token, row_index),
+        })
+
+    response = render(
+        request,
+        'hod_template/import_learner_credentials.html',
+        {
+            'credentials': credentials,
+            'import_batch': batch,
+            'page_title': 'Learner Import Complete',
+            'school_profile': SchoolProfile.objects.order_by('pk').first(),
+            'generated_at': timezone.localtime(timezone.now()),
+            'generated_by': (
+                request.user.get_full_name().strip()
+                or request.user.username
+            ),
+        },
+    )
+    response['Cache-Control'] = (
+        'no-store, no-cache, must-revalidate, private')
+    response['Pragma'] = 'no-cache'
+    return response
 
 
 @login_required
@@ -1474,7 +2736,7 @@ def download_learner_import_template(request):
             'attachment; filename="learner-import-template.csv"')
         response.write('\ufeff')
         csv.writer(response).writerow([
-            'first_name', 'last_name', 'username', 'gender', 'course',
+            'first_name', 'last_name', 'gender', 'class',
         ])
         return response
     if export_format == 'xlsx':
@@ -1483,7 +2745,7 @@ def download_learner_import_template(request):
         workbook = Workbook(write_only=True)
         worksheet = workbook.create_sheet('Learners')
         worksheet.append([
-            'first_name', 'last_name', 'username', 'gender', 'course',
+            'first_name', 'last_name', 'gender', 'class',
         ])
         buffer = BytesIO()
         workbook.save(buffer)
@@ -1497,10 +2759,6 @@ def download_learner_import_template(request):
             'attachment; filename="learner-import-template.xlsx"')
         return response
     return HttpResponse('Unsupported template format.', status=400)
-
-
-def manage_subject(request):
-    return _render_manage_subjects(request)
 
 
 def edit_student(request, student_id):
@@ -1521,10 +2779,10 @@ def edit_student(request, student_id):
             first_name = form.cleaned_data.get('first_name')
             last_name = form.cleaned_data.get('last_name')
             address = form.cleaned_data.get('address')
-            username = form.cleaned_data.get('username')
             gender = form.cleaned_data.get('gender')
             password = form.cleaned_data.get('password') or None
-            course = form.cleaned_data.get('course')
+            school_class = school_class_from_label(
+                form.cleaned_data.get('grade_and_class'))
             academic_period = form.cleaned_data.get('academic_period')
             passport = request.FILES.get('profile_pic') or None
             try:
@@ -1534,7 +2792,6 @@ def edit_student(request, student_id):
                     filename = fs.save(passport.name, passport)
                     passport_url = fs.url(filename)
                     user.profile_pic = passport_url
-                user.username = username
                 if password != None:
                     user.set_password(password)
                     user.failed_login_attempts = 0
@@ -1544,9 +2801,15 @@ def edit_student(request, student_id):
                 user.gender = gender
                 user.address = address
                 user.save()
-                student.course = course
+                class_changed = student.school_class_id != getattr(
+                    school_class, 'pk', None)
+                if class_changed:
+                    reset_class_requests(student)
+                student.school_class = school_class
                 student.academic_period = academic_period
                 student.save()
+                if class_changed:
+                    create_class_requests(student)
                 messages.success(request, "Successfully Updated")
                 return redirect(reverse('edit_student', args=[student_id]))
             except Exception as e:
@@ -1558,196 +2821,480 @@ def edit_student(request, student_id):
     return render(request, "hod_template/edit_student_template.html", context)
 
 
-def edit_subject(request, subject_id):
-    subject_queryset = (
-        Subject.objects.filter(teacher__teacher=request.user)
-        if request.user.user_type == '3'
-        else Subject.objects.all()
-    )
-    instance = get_object_or_404(subject_queryset, id=subject_id)
-    form = SubjectForm(
-        request.POST or None, instance=instance, user=request.user)
-    context = {
-        'form': form,
-        'subject_id': subject_id,
-        'page_title': 'Edit Subject'
-    }
-    if request.method == 'POST':
-        if form.is_valid():
+def _initial_assessment_rows(school_class, subject, academic_period):
+    plan = AssessmentPlan.objects.filter(
+        school_class=school_class,
+        subject=subject,
+        academic_period=academic_period,
+    ).first()
+    source_plan = plan or previous_period_plan(
+        subject, school_class, academic_period)
+    assessments = active_assessments(source_plan)
+    if assessments:
+        rows = [
+            {
+                'pk': item.pk if plan else '',
+                'name': item.name,
+                'weight': item.weight,
+                'maximum_mark': item.maximum_mark,
+                'index': index,
+            }
+            for index, item in enumerate(assessments)
+        ]
+    else:
+        rows = [
+            {
+                'pk': '',
+                'name': name,
+                'weight': Decimal('50'),
+                'maximum_mark': Decimal('100'),
+                'index': index,
+            }
+            for index, name in enumerate(('Test 1', 'Examination'))
+        ]
+    return plan, rows
+
+
+def _accepted_learners_for_subject(user, school_class, subject):
+    if not subject.teacher_id:
+        return Student.objects.none()
+    if user.user_type == '3' and subject.teacher.teacher_id != user.pk:
+        return Student.objects.none()
+    return Student.objects.filter(
+        school_class=school_class,
+        teacher_requests__teacher=subject.teacher,
+        teacher_requests__status=LearnerTeacherRequest.ACCEPTED,
+    ).select_related('admin').distinct().order_by(
+        'admin__last_name', 'admin__first_name', 'admin__username')
+
+
+def _result_rows_for_selection(school_class, subject, academic_period, learners):
+    results = StudentResult.objects.filter(
+        subject=subject,
+        student__in=learners,
+    ).filter(
+        Q(academic_period=academic_period)
+        | Q(
+            academic_period__isnull=True,
+            student__academic_period=academic_period,
+        )
+    ).select_related('student__admin', 'student__school_class')
+    results_by_student = {}
+    for result in results.order_by('-created_at', '-pk'):
+        results_by_student.setdefault(result.student_id, result)
+    return results_by_student
+
+
+def _posted_assessment_rows(request, plan, starting_rows):
+    submitted_ids = request.POST.getlist('assessment_ids')
+    if not submitted_ids:
+        return starting_rows, ['Select a class, subject, and academic period first.']
+
+    remove_id = request.POST.get('remove_assessment', '')
+    errors = []
+    rows = []
+    names = set()
+    for index, raw_id in enumerate(submitted_ids):
+        if raw_id and not raw_id.isdigit():
+            errors.append('An assessment selection is invalid.')
+            continue
+        if remove_id and raw_id == remove_id:
+            continue
+        assessment = None
+        if raw_id:
+            assessment = (
+                plan.assessments.filter(
+                    pk=int(raw_id), is_previous_record=False).first()
+                if plan else None
+            )
+            if assessment is None:
+                errors.append('An assessment does not belong to this setup.')
+                continue
+        name = request.POST.get(f'assessment_{index}_name', '').strip()
+        raw_weight = request.POST.get(f'assessment_{index}_weight', '')
+        raw_maximum = request.POST.get(
+            f'assessment_{index}_maximum', '')
+        if not name or len(name) > 100:
+            errors.append('Assessment names must contain 1 to 100 characters.')
+            continue
+        if name.casefold() == 'previous total (test + exam)':
+            errors.append('That assessment name is reserved for previous records.')
+            continue
+        try:
+            weight = Decimal(raw_weight)
+            maximum = Decimal(raw_maximum)
+        except (InvalidOperation, TypeError, ValueError):
+            errors.append(f'Enter valid weight and maximum mark for {name}.')
+            continue
+        if (
+            not weight.is_finite()
+            or weight.as_tuple().exponent < -2
+            or not Decimal('0') <= weight <= Decimal('100')
+        ):
+            errors.append(f'{name} weight must be between 0 and 100%.')
+        if (
+            not maximum.is_finite()
+            or maximum.as_tuple().exponent < -2
+            or not Decimal('0') < maximum <= Decimal('99999.99')
+        ):
+            errors.append(f'{name} maximum mark must be greater than zero.')
+        if name.casefold() in names:
+            errors.append('Assessment names must be unique.')
+        names.add(name.casefold())
+        rows.append({
+            'assessment': assessment,
+            'name': name,
+            'weight': weight,
+            'maximum_mark': maximum,
+            'index': index,
+        })
+
+    if not rows:
+        errors.append('Keep at least one assessment in the setup.')
+    if remove_id:
+        removal = (
+            plan.assessments.filter(
+                pk=remove_id, is_previous_record=False).first()
+            if plan and remove_id.isdigit() else None
+        )
+        if removal is None or removal.name.casefold() == 'examination':
+            errors.append('The examination cannot be removed.')
+    return rows, errors
+
+
+def _posted_scores(request, rows, learners):
+    values = {}
+    errors = []
+    for learner in learners:
+        learner_values = {}
+        for row in rows:
+            raw_value = request.POST.get(
+                f"score_{learner.pk}_{row['index']}", '').strip()
+            if not raw_value:
+                learner_values[row['index']] = None
+                continue
             try:
-                subject = form.save(commit=False)
-                if request.user.user_type == '3':
-                    subject.teacher = teacher_profile(request.user)
-                subject.save()
-                messages.success(request, "Successfully Updated")
-                return redirect(reverse('edit_subject', args=[subject_id]))
-            except Exception as e:
-                messages.error(request, "Could Not Add " + str(e))
-        else:
-            messages.error(request, "Fill Form Properly")
-    return render(request, 'hod_template/edit_subject_template.html', context)
+                score = Decimal(raw_value)
+            except (InvalidOperation, TypeError, ValueError):
+                errors.append(
+                    f'Enter a valid mark for {learner.admin.get_full_name()} '
+                    f'in {row["name"]}.')
+                continue
+            if (
+                not score.is_finite()
+                or score < 0
+                or score > row['maximum_mark']
+            ):
+                errors.append(
+                    f'{row["name"]} marks must be between 0 and '
+                    f'{row["maximum_mark"]}.')
+                continue
+            learner_values[row['index']] = score
+        values[learner.pk] = learner_values
+    return values, errors
 
 
-def manage_assessment_weights(request):
-    if request.user.user_type != '3':
+def _remove_assessment_scores(plan, assessment_id):
+    results = StudentResult.objects.filter(
+        subject=plan.subject,
+    ).filter(
+        Q(academic_period=plan.academic_period)
+        | Q(
+            academic_period__isnull=True,
+            student__academic_period=plan.academic_period,
+        )
+    )
+    key = str(assessment_id)
+    for result in results:
+        scores = dict(result.assessment_scores or {})
+        if scores.pop(key, None) is not None:
+            result.assessment_scores = scores
+            result.save()
+
+
+@login_required
+def manage_student_results(request):
+    if request.user.user_type == '2':
+        return redirect(reverse('student_home'))
+    if request.user.user_type not in ('1', '3'):
         return redirect(reverse('admin_home'))
 
-    subjects = visible_subjects(request.user)
-    if request.method == 'POST':
-        subject_id = request.POST.get('subject', '')
-        period_id = request.POST.get('academic_period', '')
-        selected_subject = (
-            subjects.filter(pk=int(subject_id)).first()
-            if subject_id.isdigit() and len(subject_id) <= 10
-            else None
-        )
-        selected_period = (
-            AcademicPeriod.objects.filter(pk=int(period_id)).first()
-            if period_id.isdigit() and len(period_id) <= 10
-            else None
-        )
-        existing = (
-            AssessmentWeight.objects.filter(
-                subject=selected_subject,
-                academic_period=selected_period,
-            ).first()
-            if selected_subject and selected_period
-            else None
-        )
-        form = AssessmentWeightForm(
-            request.POST,
-            instance=existing,
-            user=request.user,
-        )
-        if form.is_valid():
-            form.save()
-            messages.success(
-                request,
-                'Assessment weights saved for this subject and academic period.',
-            )
-            return redirect(reverse('manage_assessment_weights'))
-    else:
-        subject_id = request.GET.get('subject', '')
-        period_id = request.GET.get('academic_period', '')
-        selected_subject = None
-        if subject_id.isdigit() and len(subject_id) <= 10:
-            selected_subject = subjects.filter(pk=int(subject_id)).first()
-        selected_period = None
-        if period_id.isdigit() and len(period_id) <= 10:
-            selected_period = AcademicPeriod.objects.filter(
-                pk=int(period_id)).first()
-        existing = (
-            AssessmentWeight.objects.filter(
-                subject=selected_subject,
-                academic_period=selected_period,
-            ).first()
-            if selected_subject and selected_period else None
-        )
-        initial = {}
-        if selected_subject:
-            initial['subject'] = selected_subject
-        if selected_period:
-            initial['academic_period'] = selected_period
-        else:
-            current_period = AcademicPeriod.objects.filter(
-                is_current=True).first()
-            if current_period:
-                initial['academic_period'] = current_period
-        form = AssessmentWeightForm(
-            instance=existing,
-            initial=initial,
-            user=request.user,
-        )
+    filter_form = ManageResultsFilterForm(
+        request.POST if request.method == 'POST' else request.GET or None,
+        user=request.user,
+    )
+    selected_class = selected_subject = selected_period = None
+    if filter_form.is_valid():
+        selected_class = filter_form.cleaned_data.get('school_class')
+        selected_subject = filter_form.cleaned_data.get('subject')
+        selected_period = filter_form.cleaned_data.get('academic_period')
 
-    return render(request, 'hod_template/manage_assessment_weights.html', {
-        'form': form,
-        'page_title': 'Assessment Weights',
+    plan = None
+    assessment_rows = []
+    learners = []
+    learner_rows = []
+    search_query = request.GET.get('search', '').strip()
+    if selected_class and selected_subject and selected_period:
+        plan, assessment_rows = _initial_assessment_rows(
+            selected_class, selected_subject, selected_period)
+        learners = list(_accepted_learners_for_subject(
+            request.user, selected_class, selected_subject))
+        if search_query:
+            learners = [
+                learner for learner in learners
+                if any(
+                    search_query.casefold() in value.casefold()
+                    for value in (
+                        learner.admin.first_name,
+                        learner.admin.last_name,
+                        learner.admin.username or '',
+                    )
+                )
+            ]
+        existing_results = _result_rows_for_selection(
+            selected_class, selected_subject, selected_period, learners)
+        if request.method == 'POST':
+            submitted_ids = request.POST.getlist('assessment_ids')
+            if submitted_ids:
+                assessment_rows = [
+                    {
+                        'pk': raw_id,
+                        'name': request.POST.get(
+                            f'assessment_{index}_name', ''),
+                        'weight': request.POST.get(
+                            f'assessment_{index}_weight', ''),
+                        'maximum_mark': request.POST.get(
+                            f'assessment_{index}_maximum', ''),
+                        'index': index,
+                    }
+                    for index, raw_id in enumerate(submitted_ids)
+                ]
+        for learner in learners:
+            result = existing_results.get(learner.pk)
+            if result:
+                prepare_result(result)
+            score_cells = []
+            for row in assessment_rows:
+                raw_id = str(row.get('pk') or '')
+                value = (
+                    (result.assessment_scores or {}).get(raw_id)
+                    if result and raw_id else None
+                )
+                if request.method == 'POST':
+                    value = request.POST.get(
+                        f"score_{learner.pk}_{row['index']}", '')
+                score_cells.append({
+                    'assessment': row,
+                    'value': value if value is not None else '',
+                })
+            learner_rows.append({
+                'student': learner,
+                'result': result,
+                'score_cells': score_cells,
+                'previous_score': (
+                    result.assessment_values[0][1]
+                    if result and result.is_previous_record
+                    and result.assessment_values else None
+                ),
+            })
+
+    if request.method == 'POST':
+        action = request.POST.get('action') or (
+            'remove_assessment'
+            if request.POST.get('remove_assessment') else ''
+        )
+        if not filter_form.is_valid() or not (
+            selected_class and selected_subject and selected_period
+        ):
+            messages.error(
+                request,
+                'Choose a valid class, subject, and academic period.',
+            )
+        elif action not in ('save', 'add_test', 'remove_assessment'):
+            messages.error(request, 'Choose a valid results action.')
+        else:
+            posted_rows, errors = _posted_assessment_rows(
+                request, plan, assessment_rows)
+            remove_id = request.POST.get('remove_assessment', '')
+            if (
+                action == 'remove_assessment'
+                and len(posted_rows) < 1
+            ):
+                errors.append('Keep at least one assessment in the setup.')
+            scores, score_errors = _posted_scores(
+                request, posted_rows, learners)
+            errors.extend(score_errors)
+            if errors:
+                for error in errors:
+                    messages.error(request, error)
+            else:
+                with transaction.atomic():
+                    if plan is None:
+                        plan = AssessmentPlan.objects.create(
+                            school_class=selected_class,
+                            subject=selected_subject,
+                            academic_period=selected_period,
+                        )
+                    saved_rows = []
+                    for position, row in enumerate(posted_rows):
+                        assessment = row['assessment'] or Assessment(
+                            plan=plan)
+                        assessment.plan = plan
+                        assessment.name = row['name']
+                        assessment.weight = row['weight']
+                        assessment.maximum_mark = row['maximum_mark']
+                        assessment.position = position
+                        assessment.save()
+                        saved_rows.append((row, assessment))
+
+                    removed_assessment = None
+                    removed_assessment_id = None
+                    if remove_id:
+                        removed_assessment = plan.assessments.filter(
+                            pk=remove_id,
+                            is_previous_record=False,
+                        ).first()
+                        if removed_assessment:
+                            removed_assessment_id = removed_assessment.pk
+                            removed_assessment.delete()
+
+                    for learner in learners:
+                        result = existing_results.get(learner.pk)
+                        learner_scores = scores[learner.pk]
+                        has_mark = any(
+                            value is not None
+                            for value in learner_scores.values())
+                        if result is None and not has_mark:
+                            continue
+                        if result is None:
+                            result = StudentResult(
+                                student=learner,
+                                subject=selected_subject,
+                                academic_period=selected_period,
+                                created_by=(
+                                    teacher_profile(request.user)
+                                    if request.user.user_type == '3'
+                                    else None
+                                ),
+                            )
+                        result.academic_period = selected_period
+                        score_map = dict(result.assessment_scores or {})
+                        if removed_assessment:
+                            score_map.pop(str(removed_assessment.pk), None)
+                        for row, assessment in saved_rows:
+                            score = learner_scores[row['index']]
+                            if score is None:
+                                score_map.pop(str(assessment.pk), None)
+                            else:
+                                score_map[str(assessment.pk)] = str(score)
+                        if has_mark:
+                            result.is_previous_record = False
+                        result.assessment_scores = score_map
+                        result.save()
+
+                    if removed_assessment:
+                        _remove_assessment_scores(
+                            plan, removed_assessment_id)
+
+                    if action == 'add_test':
+                        current_assessments = list(
+                            plan.assessments.filter(
+                                is_previous_record=False).order_by(
+                                    'position', 'pk'))
+                        test_numbers = [
+                            int(match.group(1))
+                            for item in current_assessments
+                            if (match := re.fullmatch(
+                                r'Test\s+(\d+)', item.name.strip(),
+                                re.IGNORECASE))
+                        ]
+                        next_number = max(test_numbers, default=0) + 1
+                        examination = next(
+                            (
+                                item for item in current_assessments
+                                if item.name.casefold() == 'examination'
+                            ),
+                            None,
+                        )
+                        position = (
+                            examination.position
+                            if examination else len(current_assessments)
+                        )
+                        if examination:
+                            Assessment.objects.filter(
+                                plan=plan,
+                                is_previous_record=False,
+                                position__gte=position,
+                            ).update(position=F('position') + 1)
+                        Assessment.objects.create(
+                            plan=plan,
+                            name=f'Test {next_number}',
+                            weight=Decimal('0'),
+                            maximum_mark=Decimal('100'),
+                            position=position,
+                        )
+                    messages.success(
+                        request,
+                        (
+                            'Assessment added.'
+                            if action == 'add_test'
+                            else 'Assessment removed and its marks deleted.'
+                            if action == 'remove_assessment'
+                            else 'Assessment settings and learner marks saved.'
+                        ),
+                    )
+                    query = (
+                        f'?school_class={selected_class.pk}'
+                        f'&subject={selected_subject.pk}'
+                        f'&academic_period={selected_period.pk}'
+                    )
+                    return redirect(
+                        reverse('manage_student_results') + query)
+
+    display_weight_total = Decimal('0')
+    for row in assessment_rows:
+        try:
+            weight = Decimal(str(row['weight']))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if weight.is_finite():
+            display_weight_total += weight
+    test_rows = [
+        row for row in assessment_rows
+        if row['name'].strip().casefold() != 'examination'
+    ]
+    if test_rows:
+        test_rows[-1]['is_last_test'] = True
+
+    return render(request, 'hod_template/manage_student_results.html', {
+        'filter_form': filter_form,
+        'selected_class': selected_class,
+        'selected_subject': selected_subject,
+        'selected_period': selected_period,
+        'assessment_rows': assessment_rows,
+        'learner_rows': learner_rows,
+        'assessment_total': display_weight_total,
+        'search_query': search_query,
+        'grading_scale': [
+            {
+                'symbol': grade['symbol'],
+                'minimum': grade['minimum'],
+                'description': grade['description'],
+            }
+            for grade in GRADING_SCALE
+        ],
+        'page_title': 'Manage Results',
     })
 
 
-def manage_student_results(request):
-    form_initial = {}
-    if request.method == 'GET':
-        for field_name, model in (
-            ('subject', Subject),
-            ('academic_period', AcademicPeriod),
-        ):
-            value = request.GET.get(field_name, '')
-            if value.isdigit() and len(value) <= 10:
-                selected = model.objects.filter(pk=int(value)).first()
-                if selected:
-                    form_initial[field_name] = selected
-    form = StudentResultForm(
-        request.POST if request.method == 'POST' else None,
-        initial=form_initial,
-        user=request.user,
-    )
-    results = list(visible_results(request.user).select_related(
-        'subject', 'academic_period', 'student__academic_period',
-    ).order_by(
-        'student__admin__last_name',
-        'student__admin__first_name',
-        'subject__name',
-    ))
-    grade_bands = list(GradeBand.objects.order_by('minimum_score'))
-    for result in results:
-        result.assessment_weights = get_assessment_weights(
-            result.subject,
-            result.academic_period or result.student.academic_period,
-        )
-        result.total_score = calculate_final_mark(
-            result, result.assessment_weights)
-        result.grade_band = get_grade_band(result.total_score, grade_bands)
-        result.grade_symbol = (
-            result.grade_band.symbol
-            if isinstance(result.grade_band, GradeBand)
-            else result.grade_band
-        )
-        test_weights = get_test_weights(result.assessment_weights) or [
-            (f'Test {number}', None) for number in range(1, 6)
-        ]
-        test_scores = get_test_scores(result, result.assessment_weights)
-        result.test_assessment_values = [
-            (name, score)
-            for (name, _), score in zip(test_weights, test_scores)
-        ]
-    context = {
-        'form': form,
-        'results': results,
-        'score_maximum': settings.SIMS_MAX_TOTAL_SCORE,
-        'page_title': 'Manage Learner Results',
-    }
-    if request.method == 'POST':
-        if form.is_valid():
-            result = form.save(commit=False)
-            if request.user.user_type == '3':
-                result.created_by = teacher_profile(request.user)
-            result.save()
-            messages.success(request, 'Learner result added successfully.')
-            return redirect(reverse('manage_student_results'))
-        messages.error(request, 'Please correct the errors in the result form.')
-    return render(request, 'hod_template/manage_student_results.html', context)
-
-
 def edit_student_result(request, result_id):
-    result = get_object_or_404(
-        visible_results(request.user), id=result_id)
-    form = StudentResultForm(
-        request.POST or None, instance=result, user=request.user)
-    context = {
-        'form': form,
-        'result': result,
-        'score_maximum': settings.SIMS_MAX_TOTAL_SCORE,
-        'page_title': 'Update Learner Result',
-        'button_text': 'Save Changes',
-    }
-    if request.method == 'POST':
-        if form.is_valid():
-            form.save()
-            messages.success(request, 'Learner result updated successfully.')
-            return redirect(reverse('manage_student_results'))
-        messages.error(request, 'Please correct the errors in the result form.')
-    return render(request, 'hod_template/edit_student_result.html', context)
+    result = get_object_or_404(visible_results(request.user), pk=result_id)
+    query = (
+        f'?school_class={result.student.school_class_id}'
+        f'&subject={result.subject_id}'
+        f'&academic_period={result.academic_period_id}'
+    )
+    return redirect(reverse('manage_student_results') + query)
 
 
 def delete_student_result(request, result_id):
@@ -1846,11 +3393,27 @@ def admin_notify_student(request):
 
 
 @csrf_exempt
+@login_required
+@require_POST
 def send_student_notification(request):
-    id = request.POST.get('id')
-    message = request.POST.get('message')
-    student = get_object_or_404(Student, admin_id=id)
-    try:
+    if request.user.user_type != '1':
+        return HttpResponseForbidden('Administrator access required.')
+    student_id = request.POST.get('id')
+    message = (request.POST.get('message') or '').strip()
+    if not message:
+        return HttpResponse('False', status=400)
+    if student_id == 'all':
+        students = Student.objects.select_related('admin').order_by('pk')
+    else:
+        students = Student.objects.filter(
+            admin_id=student_id).select_related('admin')
+        get_object_or_404(students, admin_id=student_id)
+
+    failed_pushes = 0
+    for student in students:
+        NotificationStudent.objects.create(student=student, message=message)
+        if not student.admin.fcm_token:
+            continue
         url = "https://fcm.googleapis.com/fcm/send"
         body = {
             'notification': {
@@ -1861,15 +3424,22 @@ def send_student_notification(request):
             },
             'to': student.admin.fcm_token
         }
-        headers = {'Authorization':
-                   'key=AAAA3Bm8j_M:APA91bElZlOLetwV696SoEtgzpJr2qbxBfxVBfDWFiopBWzfCfzQp2nRyC7_A2mlukZEHV4g1AmyC6P_HonvSkY2YyliKt5tT3fe_1lrKod2Daigzhb2xnYQMxUWjCAIQcUexAMPZePB',
-                   'Content-Type': 'application/json'}
-        data = requests.post(url, data=json.dumps(body), headers=headers)
-        notification = NotificationStudent(student=student, message=message)
-        notification.save()
-        return HttpResponse("True")
-    except Exception as e:
-        return HttpResponse("False")
+        headers = {
+            'Authorization':
+                'key=AAAA3Bm8j_M:APA91bElZlOLetwV696SoEtgzpJr2qbxBfxVBfDWFiopBWzfCfzQp2nRyC7_A2mlukZEHV4g1AmyC6P_HonvSkY2YyliKt5tT3fe_1lrKod2Daigzhb2xnYQMxUWjCAIQcUexAMPZePB',
+            'Content-Type': 'application/json',
+        }
+        try:
+            response = requests.post(
+                url, data=json.dumps(body), headers=headers, timeout=10)
+            response.raise_for_status()
+        except requests.RequestException:
+            failed_pushes += 1
+            logger.exception(
+                'Push notification delivery failed for learner %s.',
+                student.pk,
+            )
+    return HttpResponse('Partial' if failed_pushes else 'True')
 
 
 @csrf_exempt
@@ -1883,13 +3453,3 @@ def delete_student(request, student_id):
     return redirect(reverse('manage_student'))
 
 
-def delete_subject(request, subject_id):
-    subject_queryset = (
-        Subject.objects.filter(teacher__teacher=request.user)
-        if request.user.user_type == '3'
-        else Subject.objects.all()
-    )
-    subject = get_object_or_404(subject_queryset, id=subject_id)
-    subject.delete()
-    messages.success(request, "Subject deleted successfully!")
-    return redirect(reverse('manage_subject'))

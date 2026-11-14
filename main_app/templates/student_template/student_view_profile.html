@@ -13,18 +13,27 @@
                         {% csrf_token %}
                         <div class="card-body">
                             <div class="form-group">
-                                <label>Username</label>
+                                <label>Account ID</label>
                                 <p class="form-control-plaintext">{{ custom_user.username }}</p>
                             </div>
+                            {% if request.user.user_type == '2' %}
                             <div class="form-group">
-                                <label>Grade</label>
-                                <p class="form-control-plaintext">{{ student.course|default:"Not assigned" }}</p>
+                                <label for="{{ form.grade_and_class.id_for_label }}">Grade and class</label>
+                                {{ form.grade_and_class }}
+                                {% if form.grade_and_class.help_text %}
+                                <small class="form-text text-muted">{{ form.grade_and_class.help_text }}</small>
+                                {% endif %}
+                                {% for error in form.grade_and_class.errors %}
+                                <div class="text-danger">{{ error }}</div>
+                                {% endfor %}
                             </div>
+                            {% endif %}
                             <div class="form-group">
                                 <label>Academic Period</label>
                                 <p class="form-control-plaintext">{{ student.academic_period|default:"Not assigned" }}</p>
                             </div>
                             {% for field in form %}
+                            {% if field.name != 'grade_and_class' %}
                             <div class="form-group">
                                 <label for="{{ field.id_for_label }}">{{ field.label }}</label>
                                 {{ field }}
@@ -35,6 +44,7 @@
                                 <div class="text-danger">{{ error }}</div>
                                 {% endfor %}
                             </div>
+                            {% endif %}
                             {% endfor %}
                         </div>
                         <div class="card-footer">

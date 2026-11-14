@@ -11,13 +11,13 @@ class Command(BaseCommand):
     help = 'Set a Django superuser password for Django Admin access.'
 
     def add_arguments(self, parser):
-        parser.add_argument('username')
+        parser.add_argument('account_id')
 
     def handle(self, *args, **options):
         user_model = get_user_model()
         try:
             admin = user_model.objects.get(
-                username__iexact=options['username'],
+                username__iexact=options['account_id'],
                 user_type='1',
                 is_superuser=True,
             )

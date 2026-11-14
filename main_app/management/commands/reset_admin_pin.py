@@ -9,13 +9,13 @@ class Command(BaseCommand):
     help = 'Generate a new PIN for an administrator.'
 
     def add_arguments(self, parser):
-        parser.add_argument('username')
+        parser.add_argument('account_id')
 
     def handle(self, *args, **options):
         user_model = get_user_model()
         try:
             admin = user_model.objects.get(
-                username__iexact=options['username'],
+                username__iexact=options['account_id'],
                 user_type='1',
             )
         except user_model.DoesNotExist as error:

@@ -16,7 +16,8 @@ from .forms import (
 )
 from .credentials import issue_pin, verify_pin
 from .activity import record_failed_attempt
-from .models import CustomUser, Student
+from .models import CustomUser, Student, school_class_from_label
+from .teacher_requests import create_class_requests
 from .UsernameBackend import UsernameBackend
 
 
@@ -33,6 +34,7 @@ def render_pin_confirmation(
     return_url=None,
     return_label='Continue to sign in',
     pin_title=None,
+    account_id=None,
 ):
     response = render(request, 'main_app/pin_issued.html', {
         'selected_role': role,
@@ -40,6 +42,7 @@ def render_pin_confirmation(
         'return_url': return_url or reverse('role_login', args=[role]),
         'return_label': return_label,
         'pin_title': pin_title or f'{role.title()} account created',
+        'account_id': account_id,
     })
     response['Cache-Control'] = 'no-store, no-cache, must-revalidate, private'
     response['Pragma'] = 'no-cache'
@@ -122,7 +125,11 @@ def login_page(request):
             return redirect(reverse("student_home"))
         if request.user.user_type == '3':
             return redirect(reverse("teacher_home"))
-    return render(request, 'main_app/landing.html')
+    return render(request, 'main_app/landing.html', {
+        'selected_role': 'learner',
+        'pin_length': settings.SIMS_PIN_LENGTH,
+        'today': timezone.localdate(),
+    })
 
 
 def role_login(request, role):
@@ -135,9 +142,15 @@ def role_login(request, role):
             return redirect(reverse('student_home'))
         if request.user.user_type == '3':
             return redirect(reverse('teacher_home'))
-    return render(request, 'main_app/login.html', {
+    login_state = request.session.pop('sign_in_form_state', {})
+    return render(request, 'main_app/landing.html', {
         'selected_role': role,
         'pin_length': settings.SIMS_PIN_LENGTH,
+        'login_account_id': (
+            login_state.get('account_id', login_state.get('username', ''))
+            if login_state.get('role') == role else ''
+        ),
+        'today': timezone.localdate(),
     })
 
 
@@ -161,12 +174,10 @@ def register_learner(request):
                 'Too many registration attempts. Please wait 15 minutes and try again.',
             )
         elif form.is_valid():
-            username = form.cleaned_data['username']
             password = form.cleaned_data['password']
             profile_picture = form.cleaned_data.get('profile_pic')
             with transaction.atomic():
                 user = CustomUser.objects.create_user(
-                    username=username,
                     password=password,
                     email='',
                     user_type='2',
@@ -177,12 +188,16 @@ def register_learner(request):
                     profile_pic=profile_picture or '',
                 )
                 student = Student.objects.get(admin=user)
-                student.course = None
+                student.school_class = school_class_from_label(
+                    form.cleaned_data['grade_and_class'])
                 student.academic_period = None
-                student.save(update_fields=['course', 'academic_period'])
+                student.save(update_fields=[
+                    'school_class', 'academic_period'])
+                create_class_requests(student)
             messages.success(
                 request,
-                'Registration complete. Sign in with your username and password.',
+                f'Registration complete. Your account ID is {user.username}. '
+                'Sign in with this ID and your password.',
             )
             return redirect(reverse('role_login', args=['learner']))
 
@@ -215,7 +230,8 @@ def doLogin(request, **kwargs):
         return redirect(reverse('login_page'))
     login_url = reverse('role_login', args=[role])
     expected_user_type = {'admin': '1', 'learner': '2', 'teacher': '3'}[role]
-    identifier = request.POST.get('username', '')
+    identifier = request.POST.get(
+        'account_id', request.POST.get('username', ''))
     password = request.POST.get('password', '')
     pin = request.POST.get('pin', '')
     backend = UsernameBackend()
@@ -273,6 +289,10 @@ def doLogin(request, **kwargs):
             if account and not account_locked:
                 _record_account_login_failure(account, now)
         messages.error(request, 'Invalid sign-in details')
+        request.session['sign_in_form_state'] = {
+            'role': role,
+            'account_id': identifier,
+        }
         return redirect(login_url)
 
     account.failed_login_attempts = 0

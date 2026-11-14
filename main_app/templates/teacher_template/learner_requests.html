@@ -1,0 +1,80 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card card-outline card-secondary">
+            <div class="card-body">
+                <form method="get" class="form-row align-items-end">
+                    <div class="form-group col-md-5">
+                        {{ filter_form.school_class.label_tag }}
+                        {{ filter_form.school_class }}
+                        {% for error in filter_form.school_class.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
+                    </div>
+                    <div class="form-group col-md-4">
+                        <button class="btn btn-secondary" type="submit">Filter</button>
+                        <a class="btn btn-light" href="{% url 'learner_requests' %}">Clear</a>
+                    </div>
+                </form>
+                <p class="mb-2">
+                    This action will affect {{ pending_count }} pending learner{{ pending_count|pluralize }} shown by the current filter.
+                </p>
+                {% if pending_count %}
+                <form method="post" class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="school_class" value="{{ filter_form.school_class.value|default_if_none:'' }}">
+                    <button class="btn btn-success" name="action" value="accept_all"
+                            onclick="return confirm('Accept all {{ pending_count }} pending learner requests shown?')">
+                        Accept all {{ pending_count }}
+                    </button>
+                </form>
+                <form method="post" class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="school_class" value="{{ filter_form.school_class.value|default_if_none:'' }}">
+                    <button class="btn btn-danger" name="action" value="decline_all"
+                            onclick="return confirm('Decline all {{ pending_count }} pending learner requests shown?')">
+                        Decline all {{ pending_count }}
+                    </button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header"><h3 class="card-title">Pending learner requests</h3></div>
+            <div class="card-body table-responsive">
+                <table class="table table-bordered table-striped">
+                    <thead>
+                        <tr><th>Learner</th><th>Class</th><th>Requested</th><th>Actions</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for item in requests %}
+                        <tr>
+                            <td>{{ item.student.admin.get_full_name|default:item.student.admin.username }}</td>
+                            <td>{{ item.school_class|default:"Not assigned" }}</td>
+                            <td>{{ item.requested_at|date:"j F Y, H:i" }}</td>
+                            <td>
+                                <form method="post" class="d-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="request_id" value="{{ item.pk }}">
+                                    <input type="hidden" name="school_class" value="{{ filter_form.school_class.value|default_if_none:'' }}">
+                                    <button class="btn btn-sm btn-success" name="action" value="accept">Accept</button>
+                                </form>
+                                <form method="post" class="d-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="request_id" value="{{ item.pk }}">
+                                    <input type="hidden" name="school_class" value="{{ filter_form.school_class.value|default_if_none:'' }}">
+                                    <button class="btn btn-sm btn-danger" name="action" value="decline">Decline</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="4">No pending learner requests match this filter.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

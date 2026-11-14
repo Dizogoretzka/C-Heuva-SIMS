@@ -1,0 +1,41 @@
+{% extends 'main_app/base.html' %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="card">
+            <div class="card-header">
+                <h3 class="card-title">
+                    {{ teacher.teacher.get_full_name|default:teacher.teacher.username }} — {{ school_class }}
+                </h3>
+            </div>
+            <div class="card-body">
+                <a class="btn btn-outline-danger mb-3"
+                   href="{% url 'assignment_learners' %}?teacher={{ teacher.pk }}&amp;school_class={{ school_class.pk }}&amp;export=pdf">PDF</a>
+                <a class="btn btn-outline-success mb-3"
+                   href="{% url 'assignment_learners' %}?teacher={{ teacher.pk }}&amp;school_class={{ school_class.pk }}&amp;export=csv">CSV</a>
+                <div class="table-responsive">
+                    <table class="table table-bordered table-striped">
+                        <thead>
+                            <tr><th>Learner</th><th>Account ID</th><th>Class</th><th>Accepted</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for item in requests %}
+                            <tr>
+                                <td>{{ item.student.admin.get_full_name|default:item.student.admin.username }}</td>
+                                <td>{{ item.student.admin.username }}</td>
+                                <td>{{ item.school_class|default:"Not assigned" }}</td>
+                                <td>{{ item.responded_at|date:"j M Y" }}</td>
+                            </tr>
+                            {% empty %}
+                            <tr><td colspan="4">No accepted learners for this teacher and class.</td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <a href="{% url 'manage_assignments' %}" class="btn btn-secondary">Back to Assignments</a>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

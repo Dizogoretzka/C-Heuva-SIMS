@@ -1,5 +1,4 @@
 import csv
-import re
 import tempfile
 from pathlib import Path
 
@@ -7,10 +6,11 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from main_app.account_ids import generate_account_id
 
 class Command(BaseCommand):
     help = (
-        'Create usernames for accounts without one and write a one-time CSV '
+        'Create account IDs for accounts without one and write a one-time CSV '
         'for distribution.'
     )
 
@@ -33,7 +33,7 @@ class Command(BaseCommand):
             ).order_by('pk')
         )
         reserved = {
-            value.lower()
+            value.casefold()
             for value in user_model.objects.exclude(username__isnull=True)
             .values_list('username', flat=True)
             if value
@@ -42,14 +42,20 @@ class Command(BaseCommand):
         rows = []
 
         for user in users:
-            username = self._available_username(user.email, reserved)
-            reserved.add(username.lower())
-            user.username = username
+            try:
+                account_id = generate_account_id(
+                    user.first_name, user.last_name, reserved)
+            except ValueError as error:
+                raise CommandError(
+                    f'Cannot generate an account ID for account {user.pk}: '
+                    f'{error}') from error
+            reserved.add(account_id.casefold())
+            user.username = account_id
             updates.append(user)
             rows.append([
                 user.get_full_name().strip(),
                 user.get_user_type_display(),
-                username,
+                account_id,
             ])
 
         temporary_path = None
@@ -64,7 +70,7 @@ class Command(BaseCommand):
             ) as output_file:
                 temporary_path = Path(output_file.name)
                 writer = csv.writer(output_file)
-                writer.writerow(['name', 'role', 'username'])
+                writer.writerow(['name', 'role', 'account_id'])
                 writer.writerows(rows)
 
             with transaction.atomic():
@@ -74,11 +80,11 @@ class Command(BaseCommand):
         except OSError as error:
             if database_updated:
                 raise CommandError(
-                    'Usernames were assigned, but the CSV could not be moved. '
+                    'Account IDs were assigned, but the CSV could not be moved. '
                     f'Recover the output from {temporary_path}: {error}'
                 ) from error
             raise CommandError(
-                f'Could not write the username CSV: {error}') from error
+                f'Could not write the account ID CSV: {error}') from error
         finally:
             if (
                 not database_updated
@@ -88,23 +94,6 @@ class Command(BaseCommand):
                 temporary_path.unlink()
 
         self.stdout.write(self.style.SUCCESS(
-            f'Created {len(rows)} usernames and wrote {output_path}. '
-            'Hand each username to its account holder.'
+            f'Created {len(rows)} account IDs and wrote {output_path}. '
+            'Hand each account ID to its account holder.'
         ))
-
-    @staticmethod
-    def _available_username(email, reserved):
-        local_part = (email or '').split('@', 1)[0].lower()
-        base = re.sub(r'[^a-z0-9._-]', '', local_part)
-        base = re.sub(r'^[^a-z0-9]+', '', base)
-        if not base:
-            base = 'user'
-        base = base[:20].ljust(4, '0')
-
-        candidate = base
-        suffix_number = 1
-        while candidate.lower() in reserved:
-            suffix = str(suffix_number)
-            candidate = f'{base[:20 - len(suffix)]}{suffix}'
-            suffix_number += 1
-        return candidate

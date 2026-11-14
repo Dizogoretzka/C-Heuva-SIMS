@@ -9,12 +9,12 @@
             <div class="card-header">
                 <h3 class="card-title">Upload a learner file</h3>
             </div>
-            <form method="post" enctype="multipart/form-data">
+            <form id="learner-import-form" method="post" enctype="multipart/form-data">
                 {% csrf_token %}
                 <input type="hidden" name="action" value="upload">
                 <div class="card-body">
                     <p>Upload a UTF-8 CSV or XLSX file. The file may contain up to {{ max_rows }} learner rows.</p>
-                    <p>Required columns: <code>first_name</code>, <code>last_name</code>, <code>username</code>, <code>gender</code> (M or F), and <code>course</code>. Leave course empty to keep a learner unassigned.</p>
+                    <p>Required columns: <code>first_name</code>, <code>last_name</code>, <code>gender</code> (M or F), and <code>class</code>. Account IDs are generated from each learner's last name and first initial. Leave class empty to keep a learner unassigned.</p>
                     <p>
                         <a href="{% url 'download_learner_import_template' %}?format=csv">CSV template</a>
                         ·
@@ -30,13 +30,58 @@
                     {% endfor %}
                 </div>
                 <div class="card-footer">
-                    <button class="btn btn-primary" type="submit">Preview Import</button>
+                    <button class="btn btn-primary" type="submit">Upload &amp; Preview</button>
                     <a class="btn btn-secondary" href="{% url 'manage_student' %}">Cancel</a>
+                    <div id="learner-upload-status" class="mt-2 text-muted"
+                         role="status" aria-live="polite" hidden>
+                        Uploading and checking the file. No learner accounts are created until you confirm the preview.
+                    </div>
                 </div>
             </form>
         </div>
 
-        {% if preview_rows %}
+        {% if import_batch %}
+        <div class="card" id="learner-import-progress"
+             data-status-url="{% url 'learner_import_status' import_batch.token %}"
+             data-process-url="{% url 'process_learner_import' import_batch.token %}"
+             data-complete-url="{% url 'complete_learner_import' import_batch.token %}"
+             data-status="{{ import_batch.status }}"
+             data-recorded="{{ import_batch.imported_rows }}"
+             data-total="{{ import_batch.total_rows }}">
+            <div class="card-header">
+                <h3 class="card-title">Import progress</h3>
+            </div>
+            <div class="card-body">
+                <p id="learner-import-count" aria-live="polite">
+                    {{ import_batch.imported_rows }}/{{ import_batch.total_rows }} learners recorded
+                </p>
+                <progress class="w-100" id="learner-import-bar"
+                          max="{{ import_batch.total_rows }}"
+                          value="{{ import_batch.imported_rows }}">
+                    {{ import_batch.imported_rows }}/{{ import_batch.total_rows }}
+                </progress>
+                <p id="learner-import-message" class="mt-2" role="status"
+                   aria-live="polite">
+                    {% if import_batch.status == 'processing' %}
+                    Saving learners in small batches. You can leave this page and resume later.
+                    {% elif import_batch.status == 'failed' %}
+                    {{ import_batch.error_message }}
+                    {% endif %}
+                </p>
+                {% if import_batch.status == 'processing' %}
+                <button class="btn btn-primary" id="resume-learner-import"
+                        type="button">Resume import</button>
+                {% elif import_batch.status == 'completed' %}
+                <a class="btn btn-success"
+                   href="{% url 'complete_learner_import' import_batch.token %}">
+                    View one-time learner credentials
+                </a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if preview_batch %}
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Preview ({{ preview_rows|length }} learner rows)</h3>
@@ -48,7 +93,7 @@
                 <form method="post">
                     {% csrf_token %}
                     <input type="hidden" name="action" value="confirm">
-                    <input type="hidden" name="preview_token" value="{{ preview_token }}">
+                    <input type="hidden" name="import_token" value="{{ preview_batch.token }}">
                     {% for field in options_form %}
                     <div class="form-group">
                         {{ field.label_tag }}
@@ -64,16 +109,16 @@
                     <div class="table-responsive">
                         <table class="table table-bordered table-striped">
                             <thead>
-                                <tr><th>File row</th><th>Name</th><th>Username</th><th>Gender</th><th>Course / grade</th><th>Validation</th></tr>
+                                <tr><th>File row</th><th>Name</th><th>Generated account ID</th><th>Gender</th><th>Class</th><th>Validation</th></tr>
                             </thead>
                             <tbody>
                                 {% for row in preview_rows %}
                                 <tr>
                                     <td>{{ row.line }}</td>
                                     <td>{{ row.data.first_name }} {{ row.data.last_name }}</td>
-                                    <td>{{ row.data.username }}</td>
+                                    <td>{{ row.data.account_id }}</td>
                                     <td>{{ row.data.gender }}</td>
-                                    <td>{{ row.data.course_name|default:"Not assigned" }}</td>
+                                    <td>{{ row.data.class_name|default:"Not assigned" }}</td>
                                     <td>
                                         {% if row.errors %}
                                         <ul class="mb-0 text-danger">
@@ -98,4 +143,94 @@
         {% endif %}
     </div>
 </section>
+<script>
+(() => {
+    const uploadForm = document.getElementById('learner-import-form');
+    const uploadStatus = document.getElementById('learner-upload-status');
+    if (uploadForm && uploadStatus) {
+        uploadForm.addEventListener('submit', () => {
+            uploadStatus.hidden = false;
+        });
+    }
+
+    const panel = document.getElementById('learner-import-progress');
+    if (!panel) return;
+
+    const count = document.getElementById('learner-import-count');
+    const bar = document.getElementById('learner-import-bar');
+    const message = document.getElementById('learner-import-message');
+    const resumeButton = document.getElementById('resume-learner-import');
+    const csrfInput = document.querySelector(
+        '#learner-import-form input[name="csrfmiddlewaretoken"]');
+    let running = false;
+
+    function showProgress(recorded, total) {
+        panel.dataset.recorded = recorded;
+        panel.dataset.total = total;
+        count.textContent = `${recorded}/${total} learners recorded`;
+        bar.max = total;
+        bar.value = recorded;
+    }
+
+    async function resumeImport() {
+        if (running) return;
+        running = true;
+        if (resumeButton) resumeButton.disabled = true;
+        message.textContent = 'Checking saved progress…';
+        try {
+            const statusResponse = await fetch(panel.dataset.statusUrl, {
+                credentials: 'same-origin',
+                headers: {'Accept': 'application/json'}
+            });
+            if (!statusResponse.ok) {
+                throw new Error('Could not read the saved import progress.');
+            }
+            let state = await statusResponse.json();
+            showProgress(state.recorded, state.total);
+
+            while (state.status === 'processing') {
+                message.textContent =
+                    `Saving learners (${state.recorded}/${state.total})…`;
+                const response = await fetch(panel.dataset.processUrl, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: {
+                        'Accept': 'application/json',
+                        'X-CSRFToken': csrfInput ? csrfInput.value : ''
+                    }
+                });
+                state = await response.json();
+                showProgress(state.recorded, state.total);
+                if (state.status === 'completed') {
+                    window.location.assign(panel.dataset.completeUrl);
+                    return;
+                }
+                if (!response.ok) {
+                    message.textContent = state.error ||
+                        'The last batch was not confirmed. Your saved progress is shown above.';
+                    return;
+                }
+            }
+
+            if (state.status === 'failed') {
+                message.textContent = state.error ||
+                    'The import stopped. Previously recorded learners are safe.';
+            } else if (state.status === 'completed') {
+                window.location.assign(panel.dataset.completeUrl);
+            }
+        } catch (error) {
+            message.textContent =
+                'Connection lost. The count above shows the last confirmed progress. After the server is available, choose Resume import to check the saved count and continue.';
+        } finally {
+            running = false;
+            if (resumeButton) resumeButton.disabled = false;
+        }
+    }
+
+    if (resumeButton) {
+        resumeButton.addEventListener('click', resumeImport);
+        if (panel.dataset.status === 'processing') resumeImport();
+    }
+})();
+</script>
 {% endblock %}
