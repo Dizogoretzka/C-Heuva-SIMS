@@ -2927,6 +2927,7 @@ class RegistrationAndRestrictedProfileTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'Registration complete')
         self.assertContains(response, 'Your account ID is learnert')
+        self.assertContains(response, 'value="learnert"')
         learner = CustomUser.objects.get(username='learnert')
         self.assertEqual(learner.user_type, '2')
         self.assertEqual(str(learner.student.school_class), 'Grade 8A')

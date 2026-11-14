@@ -199,6 +199,10 @@ def register_learner(request):
                 f'Registration complete. Your account ID is {user.username}. '
                 'Sign in with this ID and your password.',
             )
+            request.session['sign_in_form_state'] = {
+                'role': 'learner',
+                'account_id': user.username,
+            }
             return redirect(reverse('role_login', args=['learner']))
 
     return render(request, 'main_app/register.html', {
