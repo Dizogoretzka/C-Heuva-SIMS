@@ -1,7 +1,12 @@
 import json
+import ntpath
+import posixpath
+from urllib.parse import urlsplit
 
 from django.apps import apps
+from django.conf import settings
 from django.core import serializers
+from django.core.exceptions import SuspiciousFileOperation
 from django.db import router, transaction
 from django.db.models import FileField, QuerySet
 from django.db.models.deletion import Collector
@@ -14,8 +19,59 @@ class RestoreConflictError(Exception):
     pass
 
 
+def _normalize_file_name(name):
+    if not name:
+        return ''
+    if not isinstance(name, str):
+        raise SuspiciousFileOperation(
+            'Recycle-bin file references must be strings.')
+
+    name = name.replace('\\', '/')
+    drive, path = ntpath.splitdrive(name)
+    if drive:
+        name = path
+    if urlsplit(name).scheme or name.startswith('//'):
+        raise SuspiciousFileOperation(
+            'Recycle-bin file references must be media-relative paths.')
+
+    media_path = urlsplit(settings.MEDIA_URL).path.strip('/')
+    prefixes = []
+    if media_path:
+        prefixes = [f'/{media_path}/', f'{media_path}/']
+    for prefix in prefixes:
+        if name.casefold().startswith(prefix.casefold()):
+            name = name[len(prefix):]
+            break
+
+    if name.startswith('/'):
+        raise SuspiciousFileOperation(
+            'Recycle-bin file references must be media-relative paths.')
+    name = posixpath.normpath(name)
+    if (
+        name in ('..', '.')
+        or name.startswith('../')
+        or name.startswith('/')
+        or ntpath.splitdrive(name)[0]
+    ):
+        raise SuspiciousFileOperation(
+            'Recycle-bin file references cannot escape the media directory.')
+    return name
+
+
+def _normalize_record_file_names(record):
+    model = apps.get_model(record['model'])
+    fields = record['fields']
+    for field in model._meta.concrete_fields:
+        if isinstance(field, FileField):
+            name = fields.get(field.name)
+            if name:
+                fields[field.name] = _normalize_file_name(name)
+
+
 def _serialized_record(instance):
-    return json.loads(serializers.serialize('json', [instance]))[0]
+    record = json.loads(serializers.serialize('json', [instance]))[0]
+    _normalize_record_file_names(record)
+    return record
 
 
 def trash_queryset(queryset, owner, record_type, record_label):
@@ -92,6 +148,11 @@ def trash_instance(instance, owner, record_type, record_label=None):
 
 def restore_entry(entry):
     snapshot = entry.snapshot
+    for record in snapshot['deleted']:
+        _normalize_record_file_names(record)
+    for update in snapshot['updated']:
+        _normalize_record_file_names(update['record'])
+
     with transaction.atomic():
         for record in snapshot['deleted']:
             model = apps.get_model(record['model'])
@@ -143,7 +204,8 @@ def permanently_delete_entry(entry):
         model = apps.get_model(record['model'])
         for field in model._meta.concrete_fields:
             if isinstance(field, FileField):
-                name = record['fields'].get(field.name)
+                name = _normalize_file_name(
+                    record['fields'].get(field.name))
                 if name:
                     files[(id(field.storage), name)] = (field.storage, name)
 
@@ -156,11 +218,16 @@ def permanently_delete_entry(entry):
                 if (
                     isinstance(field, FileField)
                     and field.storage == storage
-                    and model._base_manager.using(using).filter(
-                        **{field.name: name}).exists()
                 ):
-                    referenced = True
-                    break
+                    references = model._base_manager.using(
+                        using).values_list(field.name, flat=True)
+                    if any(
+                        _normalize_file_name(reference) == name
+                        for reference in references.iterator()
+                        if reference
+                    ):
+                        referenced = True
+                        break
             if referenced:
                 break
         if not referenced:
@@ -182,7 +249,8 @@ def _snapshot_references_file(snapshot, storage, name):
             if (
                 isinstance(field, FileField)
                 and field.storage == storage
-                and record['fields'].get(field.name) == name
+                and _normalize_file_name(
+                    record['fields'].get(field.name)) == name
             ):
                 return True
     return False

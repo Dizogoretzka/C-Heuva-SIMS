@@ -222,6 +222,45 @@ class RecycleBinTests(TestCase):
 
                 self.assertFalse(image_path.exists())
 
+    def test_permanent_deletion_normalizes_legacy_media_url(self):
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                image_data = BytesIO()
+                Image.new('RGB', (1, 1), color='white').save(
+                    image_data, format='PNG')
+                self.learner.profile_pic.save(
+                    'legacy-profile.png',
+                    SimpleUploadedFile(
+                        'legacy-profile.png', image_data.getvalue(),
+                        content_type='image/png'),
+                    save=True,
+                )
+                image_path = Path(self.learner.profile_pic.path)
+                entry = trash_queryset(
+                    CustomUser.objects.filter(pk=self.learner.pk),
+                    self.admin,
+                    'learners',
+                    'Legacy recycle profile',
+                )
+                user_record = next(
+                    record for record in entry.snapshot['deleted']
+                    if record['model'] == 'main_app.customuser'
+                )
+                user_record['fields']['profile_pic'] = (
+                    '/media/legacy-profile.png')
+                entry.save(update_fields=['snapshot'])
+                self.client.force_login(self.admin)
+
+                response = self.client.post(reverse(
+                    'permanently_delete_recycle_bin_entry',
+                    args=[entry.pk],
+                ))
+
+                self.assertEqual(response.status_code, 302)
+                self.assertFalse(image_path.exists())
+                self.assertFalse(
+                    RecycleBinEntry.objects.filter(pk=entry.pk).exists())
+
 
 class SessionInactivityTests(TestCase):
     def setUp(self):
