@@ -20,6 +20,7 @@
                         <a href="{% url 'manage_assignments' %}" class="btn btn-light">Clear</a>
                     </div>
                 </form>
+                <p>{{ report_count }} records match the current filters.</p>
                 <a class="btn btn-outline-danger"
                    href="{% url 'manage_assignments' %}?{% if export_query %}{{ export_query }}&amp;{% endif %}export=pdf">PDF</a>
                 <a class="btn btn-outline-success"

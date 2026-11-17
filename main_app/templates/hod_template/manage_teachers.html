@@ -9,9 +9,12 @@
             </div>
             <div class="card-body table-responsive">
                 <div class="mb-3">
+                    <p>{{ matching_count }} teachers match the current filters.</p>
+                    {% if request.user.user_type == '1' %}
                     <a href="{% url 'add_teacher' %}" class="btn btn-primary rounded-0">
                         <i class="fas fa-user-plus mr-1"></i> Add Teacher
                     </a>
+                    {% endif %}
                     <a href="?{% if search_query %}search={{ search_query|urlencode }}&amp;{% endif %}export=pdf" class="btn btn-outline-primary"
                        data-export-trigger>Download PDF</a>
                     <a href="?{% if search_query %}search={{ search_query|urlencode }}&amp;{% endif %}export=csv" class="btn btn-outline-success"
@@ -28,6 +31,7 @@
                         <a class="btn btn-light" href="{% url 'manage_teachers' %}">Clear</a>
                     </div>
                 </form>
+                {% if request.user.user_type == '1' %}
                 <form method="post" action="{% url 'bulk_delete_records' 'teachers' %}"
                       class="mb-3"
                       onsubmit="return confirm('Move all matching teacher accounts and related records to the recycle bin?');">
@@ -39,6 +43,7 @@
                         <i class="fas fa-trash-alt mr-1"></i> Delete all filtered teachers
                     </button>
                 </form>
+                {% endif %}
                 <table class="table table-bordered table-hover">
                     <thead>
                         <tr><th>Name</th><th>Account ID</th><th>Gender</th><th>Actions</th></tr>
@@ -50,6 +55,7 @@
                             <td>{{ profile.teacher.username }}</td>
                             <td>{{ profile.teacher.get_gender_display }}</td>
                             <td class="text-nowrap">
+                                {% if request.user.user_type == '1' %}
                                 <a href="{% url 'edit_teacher' profile.pk %}" class="btn btn-sm btn-primary">Edit</a>
                                 <a href="{% url 'reset_user_credentials' profile.teacher_id %}" class="btn btn-sm btn-secondary">Reset PIN</a>
                                 <form method="post" action="{% url 'delete_teacher' profile.pk %}"
@@ -57,6 +63,7 @@
                                     {% csrf_token %}
                                     <button type="submit" class="btn btn-sm btn-danger">Delete</button>
                                 </form>
+                                {% endif %}
                             </td>
                         </tr>
                         {% empty %}

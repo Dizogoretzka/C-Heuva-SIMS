@@ -16,6 +16,7 @@ from .grading import (
 )
 from .models import *
 from .models import school_class_from_label
+from .security_reset import security_question_profile_form
 from .views import render_pin_confirmation, update_profile_from_form
 from .teacher_requests import create_class_requests, reset_class_requests
 
@@ -60,19 +61,22 @@ def student_home(request):
     student = get_object_or_404(Student, admin=request.user)
     _, accepted_requests, relationship_status = _learner_relationships(student)
     available_subjects = _learner_subjects(student, accepted_requests)
-    available_results = StudentResult.objects.filter(
-        student=student,
-        subject__in=available_subjects,
-    )
-    report_card_available = bool(
-        student.academic_period
-        and available_results.filter(
-            academic_period=student.academic_period).exists()
-    )
+    if student.academic_period:
+        from .hod_views import _report_card_results
+
+        available_results = _report_card_results(
+            request.user, student, student.academic_period,
+        ).filter(subject__in=available_subjects)
+    else:
+        available_results = StudentResult.objects.none()
+    report_card_available = available_results.exists()
     context = {
         'total_subject': available_subjects.count(),
+        'security_question_missing': not bool(
+            request.user.security_question),
         'student_result_count': available_results.count(),
         'report_card_available': report_card_available,
+        'report_card_period_assigned': bool(student.academic_period),
         'relationship_status': relationship_status,
         'page_title': 'Learner Homepage'
     }
@@ -144,18 +148,33 @@ def student_feedback(request):
 def student_view_profile(request):
     student = get_object_or_404(Student, admin=request.user)
     custom_user = student.admin
+    security_question_post = (
+        request.method == 'POST'
+        and request.POST.get('action') == 'security_question'
+    )
     form = ProfileUpdateForm(
-        request.POST or None,
+        None if security_question_post else request.POST or None,
         request.FILES or None,
         user=custom_user,
         student=student,
     )
+    security_form, security_saved = security_question_profile_form(
+        request, custom_user)
     context = {'form': form,
                'page_title': 'My Profile',
                'custom_user': custom_user,
                'student': student,
+               'security_question_form': security_form,
+               'security_question_missing': not bool(
+                   custom_user.security_question),
                }
-    if request.method == 'POST' and form.is_valid():
+    if security_saved:
+        return redirect(reverse('student_view_profile'))
+    if (
+        request.method == 'POST'
+        and not security_question_post
+        and form.is_valid()
+    ):
         with transaction.atomic():
             new_password, issued_pin = update_profile_from_form(
                 custom_user, form)
@@ -212,14 +231,20 @@ def student_view_result(request):
     student = get_object_or_404(Student, admin=request.user)
     _, accepted_requests, relationship_status = _learner_relationships(student)
     available_subjects = _learner_subjects(student, accepted_requests)
-    results = list(StudentResult.objects.filter(
-        student=student,
-        subject__in=available_subjects,
-    ).select_related(
+    if student.academic_period:
+        from .hod_views import _report_card_results
+
+        results = list(_report_card_results(
+            request.user, student, student.academic_period,
+        ).filter(
+            subject__in=available_subjects,
+        ).select_related(
             'subject', 'academic_period', 'student__academic_period'))
+    else:
+        results = []
     for result in results:
         prepare_result(result)
-    has_report_card = bool(student.academic_period and results)
+    has_report_card = bool(results)
     context = {
         'results': results,
         'student': student,
@@ -252,7 +277,7 @@ def student_report_card(request):
     )
     if response is None:
         messages.warning(
-            request, 'There are no results for your assigned academic period.')
+            request, 'Your report card has not been published yet.')
         return redirect(reverse('student_view_result'))
     return response
 

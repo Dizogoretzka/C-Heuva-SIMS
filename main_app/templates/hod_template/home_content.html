@@ -3,6 +3,14 @@
 {% block content %}
 <section class="content">
     <div class="container-fluid">
+        {% if security_question_missing %}
+        <div class="alert alert-info" role="status">
+            Set a security question so you can reset your own password.
+            <a href="{% if is_teacher %}{% url 'teacher_profile' %}{% else %}{% url 'admin_view_profile' %}{% endif %}">
+                Set it in My Profile.
+            </a>
+        </div>
+        {% endif %}
         <div class="row">
             <div class="col-lg-4 col-6">
                 <div class="small-box bg-info">

@@ -1,4 +1,18 @@
+from django.conf import settings
+
 from .models import AcademicPeriod, LearnerTeacherRequest, Teacher
+
+
+def idle_timeout(request):
+    timeout_seconds = settings.SIMS_IDLE_TIMEOUT_SECONDS
+    hours, remainder = divmod(timeout_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return {
+        'sims_idle_timeout_seconds': timeout_seconds,
+        'sims_idle_timeout_display': (
+            f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+        ),
+    }
 
 
 def current_academic_period(request):

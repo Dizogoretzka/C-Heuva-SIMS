@@ -1,0 +1,59 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Set your new password</title>
+    <link rel="stylesheet"
+          href="{% static 'plugins/fontawesome-free/css/all.min.css' %}">
+    <link rel="stylesheet"
+          href="{% static 'dist/css/adminlte.min.css' %}">
+    <link rel="stylesheet"
+          href="{% static 'main_app/css/branding.css' %}?v=5">
+</head>
+<body class="hold-transition login-page">
+    <div class="login-box">
+        <div class="card">
+            <div class="card-header">
+                <h1 class="h4 mb-0">Set your new password</h1>
+            </div>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="activation_token"
+                       value="{{ activation_token }}">
+                <div class="card-body">
+                    {% for field in form %}
+                    <div class="form-group">
+                        {{ field.label_tag }}
+                        {{ field }}
+                        {% if field.help_text %}
+                        <small class="form-text text-muted">
+                            {{ field.help_text }}
+                        </small>
+                        {% endif %}
+                        {% for error in field.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                        {% endfor %}
+                    </div>
+                    {% endfor %}
+                    {% if form.non_field_errors %}
+                    <div class="alert alert-danger">
+                        {{ form.non_field_errors }}
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="card-footer">
+                    <button class="btn btn-primary btn-block" type="submit">
+                        Save new password
+                    </button>
+                    <a class="btn btn-link btn-block"
+                       href="{% url 'role_login' 'learner' %}">
+                        Return to learner sign-in
+                    </a>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

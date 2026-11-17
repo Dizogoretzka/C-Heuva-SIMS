@@ -14,6 +14,7 @@ from .forms import (
     TeacherRequestFilterForm,
     TeacherSubjectSetupForm,
 )
+from .learner_ordering import sort_learners
 from .models import (
     LearnerTeacherRequest,
     Student,
@@ -25,12 +26,15 @@ from .models import (
 from .scoping import visible_students, visible_subjects
 from .teacher_requests import create_requests_for_class
 from .views import render_pin_confirmation, update_profile_from_form
+from .security_reset import security_question_profile_form
 
 
 @login_required
 def teacher_home(request):
     return render(request, 'hod_template/home_content.html', {
         'page_title': 'Teacher Dashboard',
+        'security_question_missing': not bool(
+            request.user.security_question),
         'total_students': visible_students(request.user).count(),
         'total_subject': visible_subjects(request.user).count(),
         'is_teacher': True,
@@ -40,12 +44,24 @@ def teacher_home(request):
 @login_required
 def teacher_profile(request):
     user = request.user
+    security_question_post = (
+        request.method == 'POST'
+        and request.POST.get('action') == 'security_question'
+    )
     form = ProfileUpdateForm(
-        request.POST or None,
+        None if security_question_post else request.POST or None,
         request.FILES or None,
         user=user,
     )
-    if request.method == 'POST' and form.is_valid():
+    security_form, security_saved = security_question_profile_form(
+        request, user)
+    if security_saved:
+        return redirect(reverse('teacher_profile'))
+    if (
+        request.method == 'POST'
+        and not security_question_post
+        and form.is_valid()
+    ):
         new_password, issued_pin = update_profile_from_form(user, form)
         if new_password or issued_pin:
             update_session_auth_hash(request, user)
@@ -65,6 +81,8 @@ def teacher_profile(request):
         'form': form,
         'custom_user': user,
         'page_title': 'My Profile',
+        'security_question_form': security_form,
+        'security_question_missing': not bool(user.security_question),
     })
 
 
@@ -199,6 +217,11 @@ def learner_requests(request):
         messages.error(request, 'Choose a valid request action and class.')
 
     pending_count = pending_requests.count()
+    pending_requests = sort_learners(
+        pending_requests.select_related(
+            'student__admin', 'student__school_class', 'school_class'),
+        lambda learner_request: learner_request.student.admin,
+    )
     return render(request, 'teacher_template/learner_requests.html', {
         'requests': pending_requests,
         'filter_form': filter_form,

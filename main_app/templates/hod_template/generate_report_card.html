@@ -7,9 +7,13 @@
             <div class="col-md-8">
                 <div class="card card-primary">
                     <div class="card-header"><h3 class="card-title">{{ page_title }}</h3></div>
-                    <form method="post">
+                    <form method="post" data-report-preview-url="{% url 'report_preview' %}">
                         {% csrf_token %}
                         <div class="card-body">
+                            <p id="report-data-preview" class="text-info"
+                               role="status" aria-live="polite">
+                                Select a learner and academic period to preview.
+                            </p>
                             {% for field in form %}
                             <div class="form-group">
                                 <label for="{{ field.id_for_label }}">{{ field.label }}</label>
@@ -30,7 +34,8 @@
                                 <i class="fas fa-file-csv mr-1"></i> Download CSV
                             </button>
                             <button type="submit" name="action" value="publish"
-                                    class="btn btn-success">
+                                    class="btn btn-success"
+                                    {% if request.user.user_type != '3' %}hidden{% endif %}>
                                 <i class="fas fa-share mr-1"></i> Publish to learner
                             </button>
                         </div>
@@ -45,3 +50,43 @@
     </div>
 </section>
 {% endblock content %}
+{% block custom_js %}
+<script>
+    (function () {
+        const form = document.querySelector("[data-report-preview-url]");
+        const preview = document.getElementById("report-data-preview");
+        const exportButtons = document.querySelectorAll("[data-export-trigger]");
+        const student = document.getElementById("id_student");
+        const period = document.getElementById("id_academic_period");
+
+        function updatePreview() {
+            exportButtons.forEach(button => button.disabled = true);
+            const params = new URLSearchParams({
+                report_type: "learner_report_card",
+                student: student.value,
+                academic_period: period.value
+            });
+            fetch(`${form.dataset.reportPreviewUrl}?${params}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error("Report preview request failed.");
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    preview.textContent = data.message;
+                    exportButtons.forEach(button => button.disabled = false);
+                })
+                .catch(error => {
+                    console.error(error);
+                    preview.textContent =
+                        "Could not check matching data. Review the selected options before downloading.";
+                });
+        }
+
+        student.addEventListener("change", updatePreview);
+        period.addEventListener("change", updatePreview);
+        updatePreview();
+    })();
+</script>
+{% endblock custom_js %}

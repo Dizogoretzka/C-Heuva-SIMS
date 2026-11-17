@@ -2,12 +2,22 @@ from django import forms
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.forms.models import ModelChoiceIterator
 from django.forms.widgets import DateInput, TextInput
 
 from .credentials import verify_pin
+from .learner_ordering import sort_learners
 from .models import *
-from .class_parser import ClassLabelError, parse_class_label
+from .class_parser import (
+    ClassLabelError,
+    format_class_label,
+    parse_class_label,
+)
 from .models import ordered_school_classes
+from .security_questions import (
+    SECURITY_QUESTIONS,
+    normalize_security_answer,
+)
 
 
 class FormSettings(forms.ModelForm):
@@ -179,8 +189,9 @@ class ReportGenerationForm(forms.Form):
                 AcademicPeriod.objects.filter(is_current=True).first())
         if role == 'teacher':
             self.fields['report_type'].choices = (
+                ('school_summary', 'School Summary'),
                 ('class_list', 'Class List'),
-                ('learner_results', 'Learner Results'),
+                ('learner_results', 'Results Mark Sheet'),
             )
             if user:
                 self.fields['school_class'].queryset = self.fields[
@@ -195,6 +206,7 @@ class ReportGenerationForm(forms.Form):
             self.fields['report_type'].choices = (
                 ('school_summary', 'School Summary'),
                 ('class_list', 'Class List'),
+                ('learner_results', 'Results Mark Sheet'),
             )
         self.fields['report_type'].widget.attrs['class'] = 'form-control'
         for name in ('school_class', 'academic_period', 'subject'):
@@ -274,8 +286,24 @@ class ActivityLogFilterForm(forms.Form):
         return cleaned_data
 
 
+class LearnerModelChoiceIterator(ModelChoiceIterator):
+    def __iter__(self):
+        if self.field.empty_label is not None:
+            yield ('', self.field.empty_label)
+        learners = sort_learners(
+            self.queryset.select_related('admin'),
+            lambda learner: learner.admin,
+        )
+        for learner in learners:
+            yield self.choice(learner)
+
+
+class LearnerModelChoiceField(forms.ModelChoiceField):
+    iterator = LearnerModelChoiceIterator
+
+
 class ReportCardForm(forms.Form):
-    student = forms.ModelChoiceField(
+    student = LearnerModelChoiceField(
         queryset=Student.objects.select_related('admin').order_by(
             'admin__last_name', 'admin__first_name'),
         label='Learner',
@@ -298,6 +326,53 @@ class ReportCardForm(forms.Form):
                     'admin__last_name', 'admin__first_name')
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
+
+
+class ReportCardPublicationForm(forms.Form):
+    school_class = forms.ModelChoiceField(
+        queryset=ordered_school_classes(),
+        required=False,
+        label='Class',
+    )
+    academic_period = forms.ModelChoiceField(
+        queryset=AcademicPeriod.objects.order_by('-year', '-term'),
+        label='Academic period',
+    )
+    school_wide = forms.BooleanField(
+        required=False,
+        label='All classes and teachers',
+    )
+
+    def __init__(self, *args, user=None, **kwargs):
+        kwargs.setdefault('auto_id', 'publication_%s')
+        super().__init__(*args, **kwargs)
+        self.user = user
+        self.fields['school_class'].queryset = ordered_school_classes()
+        if user and user.user_type == '3':
+            self.fields['school_class'].required = True
+            self.fields['school_class'].queryset = self.fields[
+                'school_class'].queryset.filter(
+                    teacher_setups__teacher__teacher=user).distinct()
+            self.fields.pop('school_wide')
+        else:
+            self.fields['school_wide'].widget.attrs['class'] = (
+                'form-check-input')
+        if not self.is_bound:
+            self.fields['academic_period'].initial = (
+                AcademicPeriod.objects.filter(is_current=True).first())
+        for field in self.fields.values():
+            field.widget.attrs.setdefault('class', 'form-control')
+
+    def clean(self):
+        cleaned_data = super().clean()
+        if (
+            self.user
+            and self.user.user_type == '1'
+            and not cleaned_data.get('school_wide')
+            and not cleaned_data.get('school_class')
+        ):
+            self.add_error('school_class', 'Choose a class or all classes.')
+        return cleaned_data
 
 
 class AcademicPeriodForm(FormSettings):
@@ -371,8 +446,54 @@ class LearnerImportOptionsForm(forms.Form):
         queryset=AcademicPeriod.objects.order_by('-year', 'term'),
         label='Academic Period',
     )
-    def __init__(self, *args, user=None, **kwargs):
+    class_for_blank_rows = forms.CharField(
+        required=False,
+        label='Class to use for rows without a class',
+        max_length=32,
+    )
+    confirm_new_classes = forms.BooleanField(
+        required=False,
+        label='Add the selected class to My Classes and Subjects',
+    )
+
+    def __init__(
+        self,
+        *args,
+        user=None,
+        missing_class_count=0,
+        imported_class_labels=(),
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
+        self.user = user
+        self.missing_class_count = missing_class_count
+        self.imported_class_labels = {
+            label for label in imported_class_labels if label
+        }
+        setups = TeacherClassSetup.objects.select_related(
+            'school_class').order_by(
+                'school_class__grade_number', 'school_class__class_letter')
+        if user and user.user_type == '3':
+            setups = setups.filter(teacher__teacher=user)
+        else:
+            setups = setups.filter(
+                school_class__teacher_setups__isnull=False).distinct()
+        self.class_suggestions = list(dict.fromkeys(
+            str(setup.school_class) for setup in setups))
+        self.existing_class_labels = set(self.class_suggestions)
+        self.new_class_labels = sorted(
+            self.imported_class_labels - self.existing_class_labels)
+        self.new_class_confirmation_required = bool(
+            user and user.user_type == '3' and self.new_class_labels)
+        if missing_class_count:
+            self.fields['class_for_blank_rows'].help_text = (
+                f'Applied to {missing_class_count} rows with no class.')
+            self.fields['class_for_blank_rows'].widget.attrs[
+                'list'] = 'learner-import-class-options'
+        else:
+            self.fields.pop('class_for_blank_rows')
+        if not user or user.user_type != '3':
+            self.fields.pop('confirm_new_classes')
         if not self.is_bound:
             self.fields['academic_period'].initial = (
                 AcademicPeriod.objects.filter(is_current=True).first())
@@ -381,7 +502,40 @@ class LearnerImportOptionsForm(forms.Form):
 
     def clean(self):
         cleaned_data = super().clean()
+        class_labels = set(self.imported_class_labels)
+        selected_class = cleaned_data.get('class_for_blank_rows')
+        if selected_class:
+            class_labels.add(selected_class)
+        self.new_class_labels = sorted(
+            class_labels - self.existing_class_labels)
+        self.new_class_confirmation_required = bool(
+            self.user
+            and self.user.user_type == '3'
+            and self.new_class_labels
+        )
+        if (
+            self.new_class_confirmation_required
+            and not cleaned_data.get('confirm_new_classes')
+        ):
+            self.add_error(
+                'confirm_new_classes',
+                'Confirm that the new class will be added to My Classes and Subjects.',
+            )
         return cleaned_data
+
+    def clean_class_for_blank_rows(self):
+        value = self.cleaned_data.get('class_for_blank_rows', '')
+        if not self.missing_class_count:
+            return ''
+        if not value:
+            raise ValidationError('Choose a class for the rows without one.')
+        try:
+            parsed = parse_class_label(value)
+        except ClassLabelError as error:
+            raise ValidationError(str(error)) from error
+        if parsed is None:
+            raise ValidationError('Choose a class for the rows without one.')
+        return format_class_label(*parsed)
 
 
 class TeacherGradeFilterForm(forms.Form):
@@ -754,6 +908,167 @@ class ProfileUpdateForm(forms.Form):
                 self.add_error('new_password', error)
 
         return cleaned_data
+
+
+class SecurityQuestionUpdateForm(forms.Form):
+    question_choice = forms.ChoiceField(
+        label='Security question',
+        choices=(('', 'Choose a security question'),) + tuple(
+            (question, question) for question in SECURITY_QUESTIONS
+        ) + (('custom', 'Write my own question'),),
+    )
+    custom_question = forms.CharField(
+        required=False,
+        max_length=255,
+        label='Your question',
+    )
+    answer = forms.CharField(
+        max_length=255,
+        label='Answer',
+        widget=forms.PasswordInput(attrs={'autocomplete': 'new-password'}),
+    )
+    current_password = forms.CharField(
+        required=False,
+        label='Current password',
+        widget=forms.PasswordInput,
+    )
+    current_pin = forms.CharField(
+        required=False,
+        label='Current PIN',
+        widget=forms.PasswordInput,
+    )
+
+    def __init__(self, *args, user, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+        saved_question = user.security_question
+        if saved_question in SECURITY_QUESTIONS:
+            self.fields['question_choice'].initial = saved_question
+        elif saved_question:
+            self.fields['question_choice'].initial = 'custom'
+            self.fields['custom_question'].initial = saved_question
+
+        if user.user_type in ('1', '3'):
+            self.fields.pop('current_password')
+            self.fields['current_pin'].label = 'Current PIN'
+        else:
+            self.fields.pop('current_pin')
+
+        for field in self.fields.values():
+            field.widget.attrs['class'] = 'form-control'
+
+    def clean_answer(self):
+        answer = normalize_security_answer(self.cleaned_data.get('answer'))
+        if len(answer) < 4:
+            raise forms.ValidationError(
+                'The answer must contain at least 4 characters.')
+        return answer
+
+    def clean(self):
+        cleaned_data = super().clean()
+        choice = cleaned_data.get('question_choice')
+        if choice == 'custom':
+            question = (cleaned_data.get('custom_question') or '').strip()
+            if not question:
+                self.add_error('custom_question', 'Enter your question.')
+        elif choice:
+            question = choice
+        else:
+            question = ''
+            self.add_error(
+                'question_choice', 'Choose or write a security question.')
+
+        if self.user.user_type in ('1', '3'):
+            current_pin = cleaned_data.get('current_pin')
+            if not current_pin or not verify_pin(
+                current_pin, self.user.pin_hash
+            ):
+                self.add_error('current_pin', 'Current PIN is incorrect.')
+        else:
+            current_password = cleaned_data.get('current_password')
+            if (
+                not current_password
+                or not self.user.check_password(current_password)
+            ):
+                self.add_error(
+                    'current_password', 'Current password is incorrect.')
+
+        cleaned_data['security_question'] = question
+        return cleaned_data
+
+
+class SecurityResetLookupForm(forms.Form):
+    first_name = forms.CharField(
+        max_length=150,
+        label='First name',
+    )
+    last_name = forms.CharField(
+        max_length=150,
+        label='Last name',
+    )
+    grade_and_class = forms.CharField(
+        required=False,
+        max_length=30,
+        label='Grade and class',
+        help_text='Examples: 8A, 8 a, 9',
+    )
+    account_id = forms.CharField(
+        required=False,
+        max_length=160,
+        label='Account ID',
+    )
+
+    def __init__(
+        self,
+        *args,
+        role,
+        account_id_required=False,
+        account_id_only=False,
+        **kwargs
+    ):
+        self.role = role
+        super().__init__(*args, **kwargs)
+        if account_id_only:
+            for name in ('first_name', 'last_name', 'grade_and_class'):
+                self.fields.pop(name)
+            self.fields['account_id'].required = True
+        elif role == 'learner':
+            self.fields['grade_and_class'].required = True
+            if account_id_required:
+                self.fields['account_id'].required = True
+            else:
+                self.fields.pop('account_id')
+        else:
+            self.fields.pop('grade_and_class')
+            self.fields['account_id'].required = True
+
+        for field in self.fields.values():
+            field.widget.attrs['class'] = 'form-control'
+
+    def clean_grade_and_class(self):
+        value = self.cleaned_data.get('grade_and_class')
+        try:
+            parsed = parse_class_label(value)
+        except ClassLabelError as error:
+            raise forms.ValidationError(str(error)) from error
+        if parsed is None:
+            raise forms.ValidationError('Enter a valid class.')
+        return parsed
+
+
+class SecurityResetAnswerForm(forms.Form):
+    answer = forms.CharField(
+        required=False,
+        max_length=255,
+        label='Answer',
+        widget=forms.PasswordInput(attrs={
+            'autocomplete': 'off',
+            'class': 'form-control',
+        }),
+    )
+
+    def clean_answer(self):
+        return normalize_security_answer(self.cleaned_data.get('answer'))
 
 
 class StaffCredentialResetForm(forms.Form):

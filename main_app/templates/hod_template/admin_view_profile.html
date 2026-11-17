@@ -34,6 +34,38 @@
                         </div>
                     </form>
                 </div>
+                <div class="card card-secondary">
+                    <div class="card-header">
+                        <h3 class="card-title">Security question</h3>
+                    </div>
+                    <div class="card-body">
+                        {% if security_question_missing %}
+                        <div class="alert alert-info" role="status">
+                            Set a security question so you can reset your own password.
+                            Ask your teacher or administrator to reset it if you need help before setting one.
+                        </div>
+                        {% else %}
+                        <p>Saved question: <strong>{{ custom_user.security_question }}</strong></p>
+                        {% endif %}
+                        <form method="post">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="security_question">
+                            {% for field in security_question_form %}
+                            <div class="form-group">
+                                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                                {{ field }}
+                                {% if field.name == 'custom_question' %}
+                                <small class="form-text text-muted">Complete this only when writing your own question.</small>
+                                {% endif %}
+                                {% for error in field.errors %}
+                                <div class="text-danger">{{ error }}</div>
+                                {% endfor %}
+                            </div>
+                            {% endfor %}
+                            <button type="submit" class="btn btn-secondary">Save security question</button>
+                        </form>
+                    </div>
+                </div>
             </div>
         </div>
     </div>

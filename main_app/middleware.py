@@ -12,8 +12,10 @@ from .activity import reset_current_request, set_current_request
 PUBLIC_URLS = {
     'login_page',
     'role_login',
+    'security_reset',
     'register_learner',
     'user_login',
+    'activate_imported_learner',
     'favicon',
     'serve',
     'static_asset',
@@ -34,10 +36,7 @@ ADMIN_ONLY_URLS = {
     'admin_view_profile',
     'admin_notify_student',
     'send_student_notification',
-    'manage_teachers',
     'manage_admins',
-    'manage_assignments',
-    'assignment_learners',
     'add_teacher',
     'edit_teacher',
     'delete_teacher',
@@ -50,7 +49,6 @@ TEACHER_ONLY_URLS = {
     'manage_student_results',
     'edit_student_result',
     'delete_student_result',
-    'generate_report_card',
 }
 
 SHARED_STAFF_URLS = {
@@ -63,7 +61,12 @@ SHARED_STAFF_URLS = {
     'download_learner_import_template',
     'edit_student',
     'delete_student',
+    'reset_imported_learner_activation',
     'generate_report',
+    'manage_teachers',
+    'manage_assignments',
+    'assignment_learners',
+    'report_preview',
     'reset_user_credentials',
 }
 
@@ -122,7 +125,7 @@ class ActivityRequestMiddleware:
             reset_current_request(token)
 
 
-class SessionInactivityMiddleware(MiddlewareMixin):
+class SessionIdleTimeoutMiddleware(MiddlewareMixin):
     def process_request(self, request):
         if not request.user.is_authenticated:
             return None
@@ -134,13 +137,12 @@ class SessionInactivityMiddleware(MiddlewareMixin):
                 inactive_seconds = now - float(last_activity)
             except (TypeError, ValueError):
                 inactive_seconds = 0
-            if inactive_seconds >= settings.SIMS_INACTIVITY_TIMEOUT_SECONDS:
+            if inactive_seconds >= settings.SIMS_IDLE_TIMEOUT_SECONDS:
+                request.META['sims_inactivity_timeout'] = True
                 logout(request)
                 messages.info(
                     request,
-                    'You were logged out because you were inactive for 5 '
-                    'minutes. Please log in again. Your saved data has not '
-                    'been deleted.',
+                    'You were signed out after 1 hour of inactivity.',
                 )
                 return redirect(reverse('login_page'))
 

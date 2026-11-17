@@ -9,9 +9,13 @@
                     <div class="card-header">
                         <h3 class="card-title">                        Create a printable report</h3>
                     </div>
-                    <form method="post">
+                    <form method="post" data-report-preview-url="{% url 'report_preview' %}">
                         {% csrf_token %}
                         <div class="card-body">
+                            <p id="report-data-preview" class="text-info"
+                               role="status" aria-live="polite">
+                                Choose report options to preview matching data.
+                            </p>
                             {% if form.non_field_errors %}
                                 <div class="alert alert-danger">{{ form.non_field_errors }}</div>
                             {% endif %}
@@ -54,6 +58,153 @@
                 </p>
             </div>
         </div>
+
+        <div class="card card-outline card-success">
+            <div class="card-header">
+                <h3 class="card-title">Publish report cards</h3>
+            </div>
+            <div class="card-body">
+                <p>
+                    Learners can see results only after they are published.
+                    {% if request.user.user_type == '3' %}
+                    Publishing includes your own subjects for learners accepted by you.
+                    {% else %}
+                    Publishing includes subjects assigned to teachers.
+                    {% endif %}
+                </p>
+                <form method="get" class="form-row align-items-end mb-3">
+                    <input type="hidden" name="manage_publications" value="1">
+                    {% for field in publication_form %}
+                    <div class="form-group col-md-4">
+                        {% if field.name == 'school_wide' %}
+                        <div class="form-check">
+                            {{ field }}
+                            {{ field.label_tag }}
+                        </div>
+                        {% else %}
+                        {{ field.label_tag }}
+                        {{ field }}
+                        {% endif %}
+                        {% for error in field.errors %}
+                        <div class="text-danger">{{ error }}</div>
+                        {% endfor %}
+                    </div>
+                    {% endfor %}
+                    <div class="form-group col-md-4">
+                        <button class="btn btn-secondary" type="submit">
+                            Show report-card status
+                        </button>
+                    </div>
+                </form>
+
+                {% if publication_results_loaded %}
+                <p>
+                    {{ publication_publish_count }} learners have results
+                    that can be published;
+                    {{ publication_unpublish_count }} learners are published.
+                </p>
+                <form method="post" class="d-inline"
+                      onsubmit="return confirm('Publish all report cards for {{ publication_publish_count }} learners?');">
+                    {% csrf_token %}
+                    <input type="hidden" name="school_class"
+                           value="{{ publication_form.school_class.value|default_if_none:'' }}">
+                    <input type="hidden" name="academic_period"
+                           value="{{ publication_form.academic_period.value|default_if_none:'' }}">
+                    {% if publication_school_wide %}
+                    <input type="hidden" name="school_wide" value="on">
+                    {% endif %}
+                    <button class="btn btn-success" name="publication_action"
+                            value="publish_all"
+                            {% if not publication_publish_count %}disabled{% endif %}>
+                        Publish all report cards ({{ publication_publish_count }})
+                    </button>
+                </form>
+                <form method="post" class="d-inline"
+                      onsubmit="return confirm('Unpublish all report cards for {{ publication_unpublish_count }} learners?');">
+                    {% csrf_token %}
+                    <input type="hidden" name="school_class"
+                           value="{{ publication_form.school_class.value|default_if_none:'' }}">
+                    <input type="hidden" name="academic_period"
+                           value="{{ publication_form.academic_period.value|default_if_none:'' }}">
+                    {% if publication_school_wide %}
+                    <input type="hidden" name="school_wide" value="on">
+                    {% endif %}
+                    <button class="btn btn-outline-danger"
+                            name="publication_action" value="unpublish_all"
+                            {% if not publication_unpublish_count %}disabled{% endif %}>
+                        Unpublish all report cards ({{ publication_unpublish_count }})
+                    </button>
+                </form>
+
+                <div class="table-responsive mt-3">
+                    <table class="table table-bordered table-striped">
+                        <thead>
+                            <tr>
+                                <th>Learner</th>
+                                <th>Account ID</th>
+                                <th>Class</th>
+                                <th>Status</th>
+                                <th>Publish switch</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in publication_rows %}
+                            <tr>
+                                <td>{{ row.student.admin.get_full_name|default:row.student.admin.username }}</td>
+                                <td>{{ row.student.admin.username }}</td>
+                                <td>{{ row.student.school_class|default:"Not assigned" }}</td>
+                                <td>
+                                    {% if row.is_published %}
+                                    Published
+                                    {% else %}
+                                    Not published
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <form method="post" class="d-inline"
+                                          onsubmit="return confirm('{% if row.is_published %}Unpublish{% else %}Publish{% endif %} the report card for 1 learner?');">
+                                        {% csrf_token %}
+                                        <input type="hidden" name="student_id"
+                                               value="{{ row.student.pk }}">
+                                        <input type="hidden" name="school_class"
+                                               value="{{ publication_form.school_class.value|default_if_none:'' }}">
+                                        <input type="hidden" name="academic_period"
+                                               value="{{ publication_form.academic_period.value|default_if_none:'' }}">
+                                        {% if publication_school_wide %}
+                                        <input type="hidden" name="school_wide" value="on">
+                                        {% endif %}
+                                        {% if row.is_published %}
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                name="publication_action"
+                                                value="unpublish_one">
+                                            Unpublish
+                                        </button>
+                                        {% elif row.has_results %}
+                                        <button class="btn btn-sm btn-outline-success"
+                                                name="publication_action"
+                                                value="publish_one">
+                                            Publish
+                                        </button>
+                                        {% else %}
+                                        <button class="btn btn-sm btn-secondary"
+                                                type="button" disabled>
+                                            No reportable results
+                                        </button>
+                                        {% endif %}
+                                    </form>
+                                </td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="5">No learners match this class and academic period.</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+            </div>
+        </div>
     </div>
 </section>
 {% endblock content %}
@@ -64,6 +215,8 @@
         const schoolClassField = document.getElementById("school-class-field");
         const periodField = document.getElementById("academic_period-field");
         const subjectField = document.getElementById("subject-field");
+        const preview = document.getElementById("report-data-preview");
+        const exportButtons = document.querySelectorAll("[data-export-trigger]");
 
         function updateFilters() {
             const selectedType = reportType.value;
@@ -73,8 +226,41 @@
             subjectField.hidden = selectedType !== "learner_results";
         }
 
-        reportType.addEventListener("change", updateFilters);
+        function updatePreview() {
+            exportButtons.forEach(button => button.disabled = true);
+            const params = new URLSearchParams({
+                report_type: reportType.value,
+                school_class: document.getElementById("id_school_class").value,
+                academic_period: document.getElementById("id_academic_period").value,
+                subject: document.getElementById("id_subject").value
+            });
+            fetch(`${document.querySelector("[data-report-preview-url]").dataset.reportPreviewUrl}?${params}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error("Report preview request failed.");
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    preview.textContent = data.message;
+                    exportButtons.forEach(button => button.disabled = false);
+                })
+                .catch(error => {
+                    console.error(error);
+                    preview.textContent =
+                        "Could not check matching data. Review the selected options before downloading.";
+                });
+        }
+
+        reportType.addEventListener("change", () => {
+            updateFilters();
+            updatePreview();
+        });
+        ["id_school_class", "id_academic_period", "id_subject"].forEach(id => {
+            document.getElementById(id).addEventListener("change", updatePreview);
+        });
         updateFilters();
+        updatePreview();
     })();
 </script>
 {% endblock custom_js %}

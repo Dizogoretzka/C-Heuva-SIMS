@@ -31,6 +31,28 @@
     <link rel="stylesheet" href="{% static 'plugins/summernote/summernote-bs4.css'%} ">
     <!-- Google Font: Source Sans Pro -->
     <link href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700" rel="stylesheet">
+    <style>
+        .sims-navbar-status {
+            max-width: 75%;
+            gap: .5rem;
+        }
+
+        .sims-idle-timer {
+            white-space: nowrap;
+            font-size: .8rem;
+        }
+
+        @media (max-width: 575.98px) {
+            .sims-navbar-status {
+                max-width: calc(100% - 3.5rem);
+                font-size: .75rem;
+            }
+
+            .sims-idle-timer {
+                font-size: .7rem;
+            }
+        }
+    </style>
     {% block custom_css %}
 
     {% endblock custom_css %}
@@ -49,7 +71,20 @@
                 </li>
 
             </ul>
-            <div class="ml-auto px-2 text-right" style="max-width: 70%; overflow-wrap: anywhere;">
+            <div class="ml-auto px-2 text-right d-flex flex-column flex-sm-row align-items-end align-items-sm-center sims-navbar-status"
+                 style="overflow-wrap: anywhere;">
+                {% if request.user.is_authenticated %}
+                <span class="sims-idle-timer text-muted">
+                    Time left:
+                    <strong id="sims-idle-timer" role="timer" aria-live="off"
+                            aria-label="Time until automatic sign out"
+                            data-timeout-seconds="{{ sims_idle_timeout_seconds }}"
+                            data-last-activity="{{ request.session.sims_last_activity|default:'' }}"
+                            data-user-id="{{ request.user.pk }}"
+                            data-keepalive-url="{% url 'session_keepalive' %}"
+                            data-logout-url="{% url 'user_logout' %}">{{ sims_idle_timeout_display }}</strong>
+                </span>
+                {% endif %}
                 {% if current_academic_period %}
                 <span class="text-muted">Academic Period:</span>
                 <strong>{{ current_academic_period }}</strong>
@@ -162,6 +197,7 @@
     <!-- AdminLTE for demo purposes -->
     <script src="{% static 'dist/js/demo.js'%} "></script>
     <script src="{% static 'main_app/js/responsive-tables.js' %}"></script>
+    <script src="{% static 'main_app/js/session-idle-timer.js' %}" defer></script>
     <script>
         document.addEventListener('input', function (event) {
             var search = event.target.closest('[data-search-target]');

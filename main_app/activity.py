@@ -76,13 +76,12 @@ def reset_current_request(token):
     _current_request.reset(token)
 
 
-def _request_details():
+def _request_actor():
     request = _current_request.get()
     if request is None:
-        return None, None
+        return None
     user = getattr(request, 'user', None)
-    actor = user if user and user.is_authenticated else None
-    return actor, request.META.get('REMOTE_ADDR')
+    return user if user and user.is_authenticated else None
 
 
 def _json_value(value):
@@ -132,7 +131,7 @@ def _target_user(instance):
 
 
 def _write_log(action, instance, changes=None, description=None):
-    actor, ip_address = _request_details()
+    actor = _request_actor()
     target = _target_user(instance)
     actor_reference = actor
     if action == 'delete' and actor and target and actor.pk == target.pk:
@@ -149,7 +148,6 @@ def _write_log(action, instance, changes=None, description=None):
         object_id=str(instance.pk or ''),
         description=(description or f'{model_name} {instance}')[:255],
         changes=changes or {},
-        ip_address=ip_address,
     )
 
 
@@ -206,9 +204,8 @@ def _record_auth_event(action, user, request=None, description=None):
         return
     if request is not None:
         actor = user if action != 'failed_sign_in' else None
-        ip_address = request.META.get('REMOTE_ADDR')
     else:
-        actor, ip_address = _request_details()
+        actor = _request_actor()
         if action == 'failed_sign_in':
             actor = None
     ActivityLog.objects.create(
@@ -225,7 +222,6 @@ def _record_auth_event(action, user, request=None, description=None):
             f'{user.get_username()} {action.replace("_", " ")}'
         )[:255],
         changes={},
-        ip_address=ip_address,
     )
 
 
@@ -236,7 +232,19 @@ def record_sign_in(sender, request, user, **kwargs):
 
 @receiver(user_logged_out, dispatch_uid='sims_activity_user_logged_out')
 def record_sign_out(sender, request, user, **kwargs):
-    _record_auth_event('sign_out', user, request=request)
+    inactivity_timeout = bool(
+        request
+        and request.META.pop('sims_inactivity_timeout', False)
+    )
+    _record_auth_event(
+        'sign_out',
+        user,
+        request=request,
+        description=(
+            'Signed out after inactivity.'
+            if inactivity_timeout else None
+        ),
+    )
 
 
 def record_failed_attempt(request, username):
@@ -265,7 +273,6 @@ def record_failed_attempt(request, username):
             f'Failed sign-in attempt for {username or "unknown user"}'
         )[:255],
         changes={},
-        ip_address=request.META.get('REMOTE_ADDR') if request else None,
     )
 
 

@@ -1,8 +1,10 @@
 import hashlib
+import secrets
 from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, update_session_auth_hash
+from django.contrib.auth.forms import SetPasswordForm
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import F
@@ -10,13 +12,20 @@ from django.contrib import messages
 from django.http import HttpResponse
 from django.shortcuts import redirect, render, reverse
 from django.utils import timezone
+from django.utils.crypto import constant_time_compare
+from django.views.decorators.http import require_GET
 
 from .forms import (
     LearnerRegistrationForm,
 )
 from .credentials import issue_pin, verify_pin
 from .activity import record_failed_attempt
-from .models import CustomUser, Student, school_class_from_label
+from .models import (
+    ActivityLog,
+    CustomUser,
+    Student,
+    school_class_from_label,
+)
 from .teacher_requests import create_class_requests
 from .UsernameBackend import UsernameBackend
 
@@ -25,6 +34,9 @@ from .UsernameBackend import UsernameBackend
 
 REGISTRATION_LIMIT = 5
 REGISTRATION_WINDOW = 15 * 60
+IMPORTED_LEARNER_ACTIVATION_SESSION_KEY = (
+    'imported_learner_password_setup')
+IMPORTED_LEARNER_ACTIVATION_TIMEOUT_SECONDS = 600
 
 
 def render_pin_confirmation(
@@ -265,6 +277,40 @@ def doLogin(request, **kwargs):
             ])
 
     ip_limited = _login_ip_limit_reached(request)
+    if (
+        role == 'learner'
+        and account
+        and account.user_type == '2'
+        and account.is_imported_learner
+        and account.password_setup_required
+        and not password
+        and not account_locked
+        and not ip_limited
+    ):
+        record_failed_attempt(request, identifier)
+        _record_login_ip_failure(request)
+        _record_account_login_failure(account, now)
+        account.refresh_from_db(fields=['locked_until'])
+        if account.locked_until and account.locked_until > now:
+            messages.error(request, 'Invalid sign-in details')
+            request.session['sign_in_form_state'] = {
+                'role': role,
+                'account_id': identifier,
+            }
+            return redirect(login_url)
+        activation_token = secrets.token_urlsafe(32)
+        request.session[IMPORTED_LEARNER_ACTIVATION_SESSION_KEY] = {
+            'token': activation_token,
+            'user_id': account.pk,
+            'expires_at': (
+                now.timestamp()
+                + IMPORTED_LEARNER_ACTIVATION_TIMEOUT_SECONDS
+            ),
+        }
+        request.session.set_expiry(
+            IMPORTED_LEARNER_ACTIVATION_TIMEOUT_SECONDS)
+        return redirect(reverse('activate_imported_learner'))
+
     identity_valid = bool(
         account
         and authenticated_user
@@ -303,6 +349,17 @@ def doLogin(request, **kwargs):
     account.locked_until = None
     account.save(update_fields=['failed_login_attempts', 'locked_until'])
     login(request, authenticated_user)
+    if account.security_reset_notice_pending:
+        reset_at = account.security_reset_at or now
+        reset_time = timezone.localtime(reset_at).strftime(
+            '%Y-%m-%d %H:%M')
+        messages.info(
+            request,
+            f'Your password (or PIN) was reset on {reset_time} using your '
+            'security question. If this was not you, tell your administrator.',
+        )
+        account.security_reset_notice_pending = False
+        account.save(update_fields=['security_reset_notice_pending'])
     if role == 'admin':
         return redirect(reverse("admin_home"))
     if role == 'teacher':
@@ -310,11 +367,118 @@ def doLogin(request, **kwargs):
     return redirect(reverse("student_home"))
 
 
+def activate_imported_learner(request):
+    activation = request.session.get(
+        IMPORTED_LEARNER_ACTIVATION_SESSION_KEY)
+    now = timezone.now()
+    if (
+        not activation
+        or activation.get('expires_at', 0) <= now.timestamp()
+    ):
+        request.session.pop(
+            IMPORTED_LEARNER_ACTIVATION_SESSION_KEY, None)
+        return redirect(reverse('role_login', args=['learner']))
+
+    account = CustomUser.objects.filter(
+        pk=activation.get('user_id'),
+        user_type='2',
+        is_imported_learner=True,
+        password_setup_required=True,
+    ).first()
+    if account is None:
+        request.session.pop(
+            IMPORTED_LEARNER_ACTIVATION_SESSION_KEY, None)
+        return redirect(reverse('role_login', args=['learner']))
+
+    if (
+        account.locked_until and account.locked_until > now
+    ) or _login_ip_limit_reached(request):
+        request.session.pop(
+            IMPORTED_LEARNER_ACTIVATION_SESSION_KEY, None)
+        messages.error(request, 'Invalid sign-in details')
+        return redirect(reverse('role_login', args=['learner']))
+
+    form = SetPasswordForm(
+        account,
+        request.POST if request.method == 'POST' else None,
+    )
+    if request.method == 'POST':
+        submitted_token = request.POST.get('activation_token', '')
+        if not constant_time_compare(
+            submitted_token, activation.get('token', '')):
+            request.session.pop(
+                IMPORTED_LEARNER_ACTIVATION_SESSION_KEY, None)
+            messages.error(request, 'Invalid sign-in details')
+            return redirect(reverse('role_login', args=['learner']))
+        if form.is_valid():
+            account = form.save(commit=False)
+            account.password_setup_required = False
+            account.failed_login_attempts = 0
+            account.locked_until = None
+            account.save()
+            ActivityLog.objects.create(
+                actor=account,
+                actor_username=account.get_username() or '',
+                target_user=account,
+                target_username=account.get_username() or '',
+                target_user_id_snapshot=str(account.pk),
+                action='update',
+                object_type='authentication',
+                object_id=str(account.pk),
+                description='Imported learner activated their account.',
+                changes={},
+            )
+            request.session.pop(
+                IMPORTED_LEARNER_ACTIVATION_SESSION_KEY, None)
+            request.session.set_expiry(None)
+            login(
+                request,
+                account,
+                backend=settings.AUTHENTICATION_BACKENDS[0],
+            )
+            return redirect(reverse('student_home'))
+
+        record_failed_attempt(request, account.get_username())
+        _record_login_ip_failure(request)
+        _record_account_login_failure(account, now)
+        account.refresh_from_db(fields=['locked_until'])
+        if (
+            account.locked_until and account.locked_until > now
+        ) or _login_ip_limit_reached(request):
+            request.session.pop(
+                IMPORTED_LEARNER_ACTIVATION_SESSION_KEY, None)
+            messages.error(request, 'Invalid sign-in details')
+            return redirect(reverse('role_login', args=['learner']))
+
+    response = render(request, 'main_app/activate_imported_learner.html', {
+        'form': form,
+        'activation_token': activation['token'],
+    })
+    response['Cache-Control'] = (
+        'no-store, no-cache, must-revalidate, private')
+    response['Pragma'] = 'no-cache'
+    return response
+
 
 def logout_user(request):
-    if request.user != None:
+    if request.user.is_authenticated:
+        if request.GET.get('reason') == 'idle':
+            request.META['sims_inactivity_timeout'] = True
+            logout(request)
+            messages.info(
+                request,
+                'You were signed out after 1 hour of inactivity.',
+            )
+            return redirect(reverse('login_page'))
         logout(request)
     return redirect("/")
+
+
+@require_GET
+def session_keepalive(request):
+    response = HttpResponse(status=204)
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 def showFirebaseJS(request):

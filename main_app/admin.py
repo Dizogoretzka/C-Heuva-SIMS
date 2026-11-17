@@ -26,7 +26,7 @@ class SchoolClassAdmin(admin.ModelAdmin):
 class ActivityLogAdmin(admin.ModelAdmin):
     list_display = (
         'created_at', 'actor_username', 'action', 'object_type',
-        'object_id', 'target_username', 'ip_address',
+        'object_id', 'target_username',
     )
     list_filter = ('action', 'object_type', 'created_at')
     search_fields = (
@@ -35,7 +35,7 @@ class ActivityLogAdmin(admin.ModelAdmin):
     readonly_fields = (
         'actor', 'actor_username', 'target_user', 'target_username',
         'target_user_id_snapshot', 'action', 'object_type', 'object_id',
-        'description', 'changes', 'ip_address', 'created_at',
+        'description', 'changes', 'created_at',
     )
 
     def has_add_permission(self, request):

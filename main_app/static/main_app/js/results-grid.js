@@ -6,10 +6,13 @@
         return;
     }
 
+    var learnerSearch = document.querySelector('[data-learner-search]');
     var weightTotal = form.querySelector('[data-weight-total]');
     var weightWarning = form.querySelector('[data-weight-warning]');
+    var unsavedStatus = form.querySelector('[data-unsaved-status]');
     var gradingScale = JSON.parse(
         document.getElementById('results-grading-scale').textContent);
+    var isSubmitting = false;
 
     function assessmentSettings() {
         return Array.prototype.map.call(
@@ -18,15 +21,19 @@
                 var weightInput = row.querySelector('[data-assessment-weight]');
                 var maximumInput = row.querySelector('[data-assessment-maximum]');
                 var nameInput = row.querySelector('input[name$="_name"]');
+                var weight = Number(weightInput.value);
+                var maximum = Number(maximumInput.value);
                 return {
                     index: Array.prototype.indexOf.call(
                         row.parentNode.children, row),
-                    weight: Number(weightInput.value),
-                    maximum: Number(maximumInput.value),
+                    weight: weight,
+                    maximum: maximum,
+                    weightText: weightInput.value,
+                    maximumText: maximumInput.value,
                     name: nameInput.value,
-                    valid: Number.isFinite(Number(weightInput.value)) &&
-                        Number.isFinite(Number(maximumInput.value)) &&
-                        Number(maximumInput.value) > 0
+                    valid: Number.isFinite(weight) && weight >= 0 &&
+                        weight <= 100 && Number.isFinite(maximum) &&
+                        maximum > 0 && maximum <= 99999.99
                 };
             }
         );
@@ -49,8 +56,8 @@
             function (heading) {
                 var assessment = assessments[Number(heading.dataset.rowIndex)];
                 if (assessment) {
-                    heading.textContent = '(' + assessment.weight + '% / ' +
-                        assessment.maximum + ')';
+                    heading.textContent = '(' + assessment.weightText +
+                        '% / ' + assessment.maximumText + ')';
                 }
             }
         );
@@ -121,11 +128,56 @@
         );
     }
 
+    function updateLearnerFilter() {
+        if (!learnerSearch) {
+            return;
+        }
+        var query = learnerSearch.value.trim().toLocaleLowerCase();
+        var rows = form.querySelectorAll('[data-learner-row]');
+        var matchCount = 0;
+        Array.prototype.forEach.call(rows, function (row) {
+            var searchable = (
+                (row.dataset.learnerName || '') + ' ' +
+                (row.dataset.accountId || '')
+            ).toLocaleLowerCase();
+            row.hidden = query !== '' && !searchable.includes(query);
+            if (!row.hidden) {
+                matchCount += 1;
+            }
+        });
+        var noMatches = form.querySelector('[data-no-learner-matches]');
+        if (noMatches) {
+            noMatches.hidden = query === '' || matchCount > 0;
+        }
+    }
+
+    function updateUnsavedState() {
+        var changed = false;
+        Array.prototype.forEach.call(
+            form.querySelectorAll('[data-unsaved-input]'),
+            function (input) {
+                var isChanged = input.value !==
+                    (input.getAttribute('data-original-value') || '');
+                input.classList.toggle('is-unsaved', isChanged);
+                if (isChanged) {
+                    changed = true;
+                }
+            }
+        );
+        if (unsavedStatus) {
+            unsavedStatus.hidden = !changed;
+        }
+        return changed;
+    }
+
     form.addEventListener('input', function (event) {
         if (event.target.matches(
                 '[data-assessment-weight], [data-assessment-maximum], ' +
                 '[data-mark-input], input[name$="_name"]')) {
             updateTotals();
+        }
+        if (event.target.matches('[data-unsaved-input]')) {
+            updateUnsavedState();
         }
     });
 
@@ -137,5 +189,20 @@
         }
     });
 
+    if (learnerSearch) {
+        learnerSearch.addEventListener('input', updateLearnerFilter);
+    }
+    form.addEventListener('submit', function () {
+        isSubmitting = true;
+    });
+    window.addEventListener('beforeunload', function (event) {
+        if (!isSubmitting && updateUnsavedState()) {
+            event.preventDefault();
+            event.returnValue = '';
+        }
+    });
+
+    updateLearnerFilter();
+    updateUnsavedState();
     updateTotals();
 }());

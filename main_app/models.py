@@ -84,6 +84,14 @@ class CustomUser(AbstractUser):
     pin_issued_at = models.DateTimeField(null=True, blank=True)
     failed_login_attempts = models.PositiveSmallIntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
+    is_imported_learner = models.BooleanField(default=False)
+    password_setup_required = models.BooleanField(default=False)
+    security_question = models.CharField(max_length=255, blank=True, default='')
+    security_answer_hash = models.CharField(max_length=256, blank=True, default='')
+    security_reset_failed_attempts = models.PositiveSmallIntegerField(default=0)
+    security_reset_locked_until = models.DateTimeField(null=True, blank=True)
+    security_reset_at = models.DateTimeField(null=True, blank=True)
+    security_reset_notice_pending = models.BooleanField(default=False)
     USERNAME_FIELD = "username"
     REQUIRED_FIELDS = []
     objects = UsernameUserManager()
@@ -396,7 +404,6 @@ class LoginActivity(models.Model):
     student = models.ForeignKey(
         Student, on_delete=models.CASCADE, related_name='login_activities')
     logged_in_at = models.DateTimeField(auto_now_add=True)
-    ip_address = models.GenericIPAddressField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
@@ -416,6 +423,7 @@ class ActivityLog(models.Model):
         ('sign_in', 'Sign in'),
         ('sign_out', 'Sign out'),
         ('failed_sign_in', 'Failed sign in'),
+        ('security_reset', 'Security reset'),
         ('export', 'Export'),
         ('import', 'Import'),
     )
@@ -443,7 +451,6 @@ class ActivityLog(models.Model):
     object_id = models.CharField(max_length=64, blank=True, default='')
     description = models.CharField(max_length=255)
     changes = models.JSONField(default=dict, blank=True)
-    ip_address = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -687,5 +694,4 @@ def record_learner_login(sender, request, user, **kwargs):
     student, _ = Student.objects.get_or_create(admin=user)
     LoginActivity.objects.create(
         student=student,
-        ip_address=request.META.get('REMOTE_ADDR') if request else None,
     )

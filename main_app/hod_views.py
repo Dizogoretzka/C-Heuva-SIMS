@@ -51,6 +51,7 @@ import reportlab
 
 from .forms import *
 from .credentials import issue_pin
+from .class_parser import ClassLabelError, parse_class_label
 from .grading import (
     GRADING_SCALE,
     active_assessments,
@@ -60,10 +61,10 @@ from .grading import (
 from .learner_imports import (
     LEARNER_IMPORT_CHUNK_SIZE,
     LearnerImportError,
-    learner_import_password,
     parse_learner_upload,
     validate_learner_rows,
 )
+from .learner_ordering import learner_name_sort_key, sort_learners
 from .models import *
 from .scoping import (
     teacher_profile,
@@ -72,6 +73,7 @@ from .scoping import (
     visible_subjects,
 )
 from .views import render_pin_confirmation, update_profile_from_form
+from .security_reset import security_question_profile_form
 from .teacher_requests import (
     create_class_requests,
     create_requests_for_class,
@@ -88,6 +90,8 @@ def admin_home(request):
     ).order_by('-logged_in_at')[:5]
     context = {
         'page_title': "Administrative Dashboard",
+        'security_question_missing': not bool(
+            request.user.security_question),
         'total_students': total_students,
         'total_subject': Subject.objects.count(),
         'learners_logged_in_today': LoginActivity.objects.filter(
@@ -268,6 +272,10 @@ def _activity_sentence(entry):
         record = f'{record} #{entry.object_id}'
     timestamp = timezone.localtime(entry.created_at).strftime(
         '%d %B %Y at %H:%M')
+    if entry.action == 'security_reset':
+        return (
+            f'{(entry.description or actor).rstrip(". ")} on {timestamp}.'
+        )
     changes = _activity_change_map(entry.changes)
     if entry.object_type == 'main_app.studentresult':
         result = StudentResult.objects.select_related(
@@ -461,7 +469,6 @@ def activity_log(request, user_id=None):
                 f'{user.get_full_name() or user.get_username()} signed in '
                 f'on {timezone.localtime(login.logged_in_at):%d %B %Y at %H:%M}.'),
             changes={},
-            ip_address=login.ip_address,
             created_at=login.logged_in_at,
         ))
     activities.sort(key=lambda item: (item.created_at, str(item.pk)), reverse=True)
@@ -486,7 +493,7 @@ def activity_log(request, user_id=None):
     if export_format in ('pdf', 'csv'):
         headers = [
             'Timestamp', 'Actor', 'Role', 'Action', 'Record',
-            'Target user', 'Description', 'IP address',
+            'Target user', 'Description',
         ]
         rows = [[
                 item.created_at.isoformat(),
@@ -496,7 +503,6 @@ def activity_log(request, user_id=None):
                 f'{item.object_type} {item.object_id}'.strip(),
                 item.target_username,
                 item.display_description,
-                item.ip_address or '',
             ] for item in activities]
         if not rows:
             messages.warning(request, 'No activity found for these filters.')
@@ -534,6 +540,8 @@ def activity_log(request, user_id=None):
 def manage_teachers(request):
     teachers = Teacher.objects.select_related('teacher').order_by(
         'teacher__last_name', 'teacher__first_name')
+    if request.user.user_type == '3':
+        teachers = teachers.filter(teacher=request.user)
     search_query = request.GET.get('search', '').strip()
     if search_query:
         teachers = teachers.filter(
@@ -542,6 +550,7 @@ def manage_teachers(request):
             | Q(teacher__username__icontains=search_query)
         )
     export_format = request.GET.get('export')
+    matching_count = teachers.count()
     if export_format in ('pdf', 'csv'):
         rows = [[
             profile.teacher.get_full_name()
@@ -563,6 +572,7 @@ def manage_teachers(request):
             )
     return render(request, 'hod_template/manage_teachers.html', {
         'teachers': teachers,
+        'matching_count': matching_count,
         'search_query': search_query,
         'page_title': 'Manage Teachers',
     })
@@ -613,9 +623,26 @@ def manage_assignments(request):
     filter_form = TeacherGradeFilterForm(request.GET)
     selected_teacher = None
     selected_class = None
+    teacher_profile_for_user = None
+    if request.user.user_type == '3':
+        teacher_profile_for_user = Teacher.objects.filter(
+            teacher=request.user).first()
+        if teacher_profile_for_user:
+            filter_form.fields['teacher'].queryset = Teacher.objects.filter(
+                pk=teacher_profile_for_user.pk)
+            filter_form.fields['school_class'].queryset = (
+                ordered_school_classes().filter(
+                    teacher_setups__teacher=teacher_profile_for_user
+                ).distinct()
+            )
+        else:
+            filter_form.fields['teacher'].queryset = Teacher.objects.none()
+            filter_form.fields['school_class'].queryset = SchoolClass.objects.none()
     if filter_form.is_valid():
         selected_teacher = filter_form.cleaned_data['teacher']
         selected_class = filter_form.cleaned_data['school_class']
+    if request.user.user_type == '3':
+        selected_teacher = teacher_profile_for_user
 
     setups = TeacherClassSetup.objects.select_related(
         'teacher__teacher', 'school_class').prefetch_related(
@@ -624,7 +651,12 @@ def manage_assignments(request):
                 queryset=Subject.objects.order_by('name'),
                 to_attr='setup_subjects',
             ))
-    if selected_teacher:
+    if request.user.user_type == '3':
+        if teacher_profile_for_user:
+            setups = setups.filter(teacher=teacher_profile_for_user)
+        else:
+            setups = setups.none()
+    elif selected_teacher:
         setups = setups.filter(teacher=selected_teacher)
     if selected_class:
         setups = setups.filter(school_class=selected_class)
@@ -651,8 +683,10 @@ def manage_assignments(request):
                 if subject.teacher_id == setup.teacher_id
             ],
             'accepted_count': accepted_count,
-            'pending_count': pending_count,
-            'declined_count': declined_count,
+            'pending_count': (
+                pending_count if request.user.user_type == '1' else ''),
+            'declined_count': (
+                declined_count if request.user.user_type == '1' else ''),
             'learners_url': (
                 f"{reverse('assignment_learners')}?teacher={setup.teacher_id}"
                 f"&school_class={setup.school_class_id}"
@@ -661,7 +695,9 @@ def manage_assignments(request):
 
     teachers_without_setup = Teacher.objects.select_related(
         'teacher').order_by('teacher__last_name', 'teacher__first_name')
-    if selected_teacher:
+    if request.user.user_type == '3':
+        teachers_without_setup = teachers_without_setup.none()
+    elif selected_teacher:
         teachers_without_setup = teachers_without_setup.filter(
             pk=selected_teacher.pk)
     if selected_class:
@@ -686,9 +722,15 @@ def manage_assignments(request):
             Q(school_class__isnull=True)
             | ~Q(school_class_id__in=configured_class_ids)
         ).order_by('admin__last_name', 'admin__first_name')
+    if request.user.user_type == '3':
+        unmatched_learners = unmatched_learners.none()
     if selected_class:
         unmatched_learners = unmatched_learners.filter(
             school_class=selected_class)
+    unmatched_learners = sort_learners(
+        unmatched_learners,
+        lambda learner: learner.admin,
+    )
 
     unconfigured_subjects = Subject.objects.filter(
         Q(teacher__isnull=True) | Q(school_class__isnull=True)
@@ -696,6 +738,11 @@ def manage_assignments(request):
     if selected_teacher:
         unconfigured_subjects = unconfigured_subjects.filter(
             Q(teacher=selected_teacher) | Q(teacher__isnull=True))
+    if request.user.user_type == '3':
+        unconfigured_subjects = unconfigured_subjects.filter(
+            teacher=selected_teacher)
+        if not selected_teacher:
+            unconfigured_subjects = unconfigured_subjects.none()
     if selected_class:
         unconfigured_subjects = unconfigured_subjects.filter(
             school_class=selected_class)
@@ -746,11 +793,16 @@ def manage_assignments(request):
 
     export_query = request.GET.copy()
     export_query.pop('export', None)
+    report_count = (
+        len(rows) + len(unmatched_learners)
+        + unconfigured_subjects.count()
+    )
     return render(request, 'hod_template/manage_assignments.html', {
         'filter_form': filter_form,
         'assignment_rows': rows,
         'unmatched_learners': unmatched_learners,
         'unconfigured_subjects': unconfigured_subjects,
+        'report_count': report_count,
         'export_query': export_query.urlencode(),
         'page_title': 'Assignments',
     })
@@ -761,14 +813,24 @@ def manage_assignments(request):
 def assignment_learners(request):
     teacher_id = request.GET.get('teacher', '')
     school_class_id = request.GET.get('school_class', '')
-    teacher = get_object_or_404(Teacher, pk=teacher_id)
+    if request.user.user_type == '3':
+        teacher = get_object_or_404(
+            Teacher, pk=teacher_id, teacher=request.user)
+    else:
+        teacher = get_object_or_404(Teacher, pk=teacher_id)
     school_class = get_object_or_404(SchoolClass, pk=school_class_id)
+    if not TeacherClassSetup.objects.filter(
+        teacher=teacher, school_class=school_class).exists():
+        return HttpResponseForbidden()
     accepted_requests = LearnerTeacherRequest.objects.filter(
         teacher=teacher,
         school_class=school_class,
         status=LearnerTeacherRequest.ACCEPTED,
-    ).select_related('student__admin', 'student__school_class').order_by(
-        'student__admin__last_name', 'student__admin__first_name')
+    ).select_related('student__admin', 'student__school_class')
+    accepted_requests = sort_learners(
+        accepted_requests,
+        lambda learner_request: learner_request.student.admin,
+    )
     export_format = request.GET.get('export')
     if export_format in ('pdf', 'csv'):
         return _export_data(
@@ -940,13 +1002,147 @@ def generate_report(request):
         return redirect(reverse('admin_home'))
 
     role = 'teacher' if request.user.user_type == '3' else 'admin'
+    publication_action = request.POST.get('publication_action')
+    if request.method == 'POST' and publication_action:
+        publication_form = ReportCardPublicationForm(
+            request.POST, user=request.user)
+        if not publication_form.is_valid():
+            return _render_generate_report_page(
+                request,
+                role,
+                publication_form=publication_form,
+            )
+
+        school_class = publication_form.cleaned_data['school_class']
+        academic_period = publication_form.cleaned_data['academic_period']
+        school_wide = publication_form.cleaned_data.get(
+            'school_wide', False)
+        if school_wide:
+            school_class = None
+        rows = _report_publication_rows(
+            request.user, school_class, academic_period, school_wide)
+
+        if publication_action in ('publish_one', 'unpublish_one'):
+            target_id = request.POST.get('student_id', '')
+            target = next(
+                (row for row in rows
+                 if str(row['student'].pk) == target_id),
+                None,
+            )
+            if target is None:
+                return HttpResponseForbidden(
+                    'The learner is outside this publication scope.')
+            if publication_action == 'publish_one':
+                if not target['has_results']:
+                    messages.warning(
+                        request,
+                        'There are no reportable results for this learner.',
+                    )
+                else:
+                    with transaction.atomic():
+                        _update_report_card_publication(
+                            request.user,
+                            target['student'],
+                            academic_period,
+                            target['teacher_ids'],
+                            publish=True,
+                        )
+                    messages.success(
+                        request, 'The learner report card was published.')
+            else:
+                with transaction.atomic():
+                    deleted_count = _update_report_card_publication(
+                        request.user,
+                        target['student'],
+                        academic_period,
+                        target['teacher_ids'],
+                        publish=False,
+                    )
+                if deleted_count:
+                    messages.success(
+                        request, 'The learner report card was unpublished.')
+                else:
+                    messages.info(
+                        request, 'This learner report card was not published.')
+        elif publication_action == 'publish_all':
+            targets = [row for row in rows if row['has_results']]
+            with transaction.atomic():
+                for target in targets:
+                    _update_report_card_publication(
+                        request.user,
+                        target['student'],
+                        academic_period,
+                        target['teacher_ids'],
+                        publish=True,
+                    )
+            if targets:
+                messages.success(
+                    request,
+                    f'Published report cards for {len(targets)} learners.',
+                )
+            else:
+                messages.warning(
+                    request,
+                    'No learners with reportable results matched this scope.',
+                )
+        elif publication_action == 'unpublish_all':
+            targets = [row for row in rows if row['is_published']]
+            with transaction.atomic():
+                for target in targets:
+                    _update_report_card_publication(
+                        request.user,
+                        target['student'],
+                        academic_period,
+                        target['teacher_ids'],
+                        publish=False,
+                    )
+            if targets:
+                messages.success(
+                    request,
+                    f'Unpublished report cards for {len(targets)} learners.',
+                )
+            else:
+                messages.info(
+                    request, 'No published report cards matched this scope.')
+        else:
+            return HttpResponse('Unsupported publication action.', status=400)
+
+        query = (
+            f'?manage_publications=1&academic_period={academic_period.pk}')
+        if school_wide:
+            query += '&school_wide=on'
+        elif school_class:
+            query += f'&school_class={school_class.pk}'
+        return redirect(reverse('generate_report') + query)
+
     form = ReportGenerationForm(
         request.POST or None, role=role, user=request.user)
     if request.method != 'POST' or not form.is_valid():
-        return render(request, 'hod_template/generate_report.html', {
-            'form': form,
-            'page_title': 'Generate Report',
-        })
+        publication_form = ReportCardPublicationForm(
+            request.GET if request.GET.get('manage_publications') else None,
+            user=request.user,
+        )
+        publication_rows = None
+        if request.GET.get('manage_publications'):
+            if publication_form.is_valid():
+                school_wide = publication_form.cleaned_data.get(
+                    'school_wide', False)
+                school_class = (
+                    None if school_wide else
+                    publication_form.cleaned_data['school_class'])
+                publication_rows = _report_publication_rows(
+                    request.user,
+                    school_class,
+                    publication_form.cleaned_data['academic_period'],
+                    school_wide,
+                )
+        return _render_generate_report_page(
+            request,
+            role,
+            form=form,
+            publication_form=publication_form,
+            publication_rows=publication_rows,
+        )
 
     report_type = form.cleaned_data['report_type']
     school_class = form.cleaned_data.get('school_class')
@@ -961,10 +1157,11 @@ def generate_report(request):
     if not rows:
         messages.warning(
             request, 'There is no data for the selected report options.')
-        return render(request, 'hod_template/generate_report.html', {
-            'form': form,
-            'page_title': 'Generate Report',
-        })
+        return _render_generate_report_page(
+            request,
+            role,
+            form=form,
+        )
 
     preamble = []
     postamble = []
@@ -996,9 +1193,191 @@ def generate_report(request):
     )
 
 
+def _render_generate_report_page(
+        request, role, form=None, publication_form=None,
+        publication_rows=None):
+    if form is None:
+        form = ReportGenerationForm(role=role, user=request.user)
+    if publication_form is None:
+        publication_form = ReportCardPublicationForm(user=request.user)
+    publication_school_wide = (
+        bool(publication_form.data.get('school_wide'))
+        if publication_form.is_bound else False
+    )
+    return render(request, 'hod_template/generate_report.html', {
+        'form': form,
+        'publication_form': publication_form,
+        'publication_rows': publication_rows,
+        'publication_results_loaded': publication_rows is not None,
+        'publication_school_wide': publication_school_wide,
+        'publication_publish_count': sum(
+            row['has_results'] for row in publication_rows or []),
+        'publication_unpublish_count': sum(
+            row['is_published'] for row in publication_rows or []),
+        'page_title': 'Generate Report',
+    })
+
+
+def _report_publication_rows(
+        user, school_class, academic_period, school_wide=False):
+    students = visible_students(user)
+    if school_wide:
+        students = students.filter(school_class__isnull=False)
+    elif school_class:
+        students = students.filter(school_class=school_class)
+
+    results = StudentResult.objects.filter(student__in=students).filter(
+        Q(academic_period=academic_period)
+        | Q(
+            academic_period__isnull=True,
+            student__academic_period=academic_period,
+        )
+    ).exclude(subject__teacher__isnull=True)
+    if user.user_type == '3':
+        results = results.filter(
+            subject__teacher__teacher=user,
+            subject__school_class_id=F('student__school_class_id'),
+        )
+
+    teacher_ids_by_student = {}
+    for student_id, teacher_id in results.values_list(
+            'student_id', 'subject__teacher_id').distinct():
+        teacher_ids_by_student.setdefault(student_id, set()).add(teacher_id)
+
+    publications = ReportCardPublication.objects.filter(
+        student__in=students,
+        academic_period=academic_period,
+    )
+    if user.user_type == '3':
+        publications = publications.filter(teacher__teacher=user)
+    published_student_ids = set(
+        publications.values_list('student_id', flat=True).distinct())
+
+    learners = sort_learners(
+        students.select_related('admin', 'school_class').distinct(),
+        lambda student: student.admin,
+    )
+    return [{
+        'student': student,
+        'teacher_ids': teacher_ids_by_student.get(student.pk, set()),
+        'has_results': bool(teacher_ids_by_student.get(student.pk)),
+        'is_published': student.pk in published_student_ids,
+    } for student in learners]
+
+
+def _update_report_card_publication(
+        user, student, academic_period, teacher_ids, publish):
+    if not publish:
+        publications = ReportCardPublication.objects.filter(
+            student=student,
+            academic_period=academic_period,
+        )
+        if user.user_type == '3':
+            publications = publications.filter(teacher__teacher=user)
+        deleted_count, _deleted = publications.delete()
+        return deleted_count
+
+    if not teacher_ids:
+        return 0
+    for teacher_id in teacher_ids:
+        ReportCardPublication.objects.update_or_create(
+            teacher_id=teacher_id,
+            student=student,
+            academic_period=academic_period,
+            defaults={'published_at': timezone.now()},
+        )
+    return len(teacher_ids)
+
+
+@login_required
+@require_GET
+def report_preview(request):
+    if request.user.user_type not in ('1', '3'):
+        return JsonResponse(
+            {'message': 'Report preview is unavailable.'}, status=403)
+
+    report_type = request.GET.get('report_type', '')
+    if report_type == 'learner_report_card':
+        form = ReportCardForm(request.GET, user=request.user)
+        if not form.is_valid():
+            return JsonResponse({
+                'message': 'Select a learner and academic period to preview.',
+            })
+        student = form.cleaned_data['student']
+        academic_period = form.cleaned_data['academic_period']
+        subject_count = _report_card_results(
+            request.user, student, academic_period
+        ).values('subject_id').distinct().count()
+        subject_label = 'subject' if subject_count == 1 else 'subjects'
+        return JsonResponse({
+            'message': (
+                f'{subject_count} {subject_label}, {academic_period}'
+                if subject_count else
+                f'No matching results, {academic_period}'
+            ),
+            'count': subject_count,
+        })
+
+    role = 'teacher' if request.user.user_type == '3' else 'admin'
+    form = ReportGenerationForm(
+        request.GET, role=role, user=request.user)
+    if not form.is_valid():
+        return JsonResponse({
+            'message': 'Choose report options to preview matching data.',
+        })
+
+    report_type = form.cleaned_data['report_type']
+    school_class = form.cleaned_data.get('school_class')
+    academic_period = form.cleaned_data.get('academic_period')
+    subject = form.cleaned_data.get('subject')
+    if report_type == 'school_summary':
+        learner_count = visible_students(request.user).count()
+        subject_count = visible_subjects(request.user).count()
+        current_period = AcademicPeriod.objects.filter(
+            is_current=True).first()
+        period_label = f', {current_period}' if current_period else ''
+        learner_label = 'learner' if learner_count == 1 else 'learners'
+        subject_label = 'subject' if subject_count == 1 else 'subjects'
+        return JsonResponse({
+            'message': (
+                f'{learner_count} {learner_label}, '
+                f'{subject_count} {subject_label}'
+                f'{period_label}'
+            ),
+            'learner_count': learner_count,
+            'subject_count': subject_count,
+        })
+
+    title, _headers, rows = _report_data(
+        report_type, school_class, academic_period, subject,
+        user=request.user)
+    if report_type == 'class_list':
+        learner_count = max(0, len(rows) - 2)
+        learner_label = 'learner' if learner_count == 1 else 'learners'
+        return JsonResponse({
+            'message': (
+                f'{learner_count} {learner_label}, {school_class}, '
+                f'{academic_period}'
+            ),
+            'learner_count': learner_count,
+        })
+
+    learner_count = _report_result_learners(
+        request.user, school_class, subject).count()
+    learner_label = 'learner' if learner_count == 1 else 'learners'
+    return JsonResponse({
+        'message': (
+            f'{learner_count} {learner_label}, 1 subject, {academic_period}'
+        ),
+        'learner_count': learner_count,
+        'subject_count': 1,
+        'has_results': bool(rows),
+    })
+
+
 @login_required
 def generate_report_card(request):
-    if request.user.user_type != '3':
+    if request.user.user_type not in ('1', '3'):
         return redirect(reverse('admin_home'))
 
     form = ReportCardForm(request.POST or None, user=request.user)
@@ -1006,17 +1385,10 @@ def generate_report_card(request):
         student = form.cleaned_data['student']
         academic_period = form.cleaned_data['academic_period']
         if request.POST.get('action') == 'publish':
-            has_results = StudentResult.objects.filter(
-                student=student,
-                subject__teacher__teacher=request.user,
-                subject__school_class=student.school_class,
-            ).filter(
-                Q(academic_period=academic_period)
-                | Q(
-                    academic_period__isnull=True,
-                    student__academic_period=academic_period,
-                )
-            ).exists()
+            if request.user.user_type != '3':
+                return HttpResponseForbidden()
+            has_results = _report_card_results(
+                request.user, student, academic_period).exists()
             if not has_results:
                 messages.warning(
                     request,
@@ -1065,28 +1437,10 @@ def generate_report_card(request):
 def _report_card_pdf(
         request, user, student, academic_period, export_format='pdf',
         actor_user=None):
-    results_queryset = StudentResult.objects.filter(
-        student=student,
-    ).filter(
-        Q(academic_period=academic_period)
-        | Q(
-            academic_period__isnull=True,
-            student__academic_period=academic_period,
-        )
-    )
-    if user.user_type == '3':
-        if not student.teacher_requests.filter(
-            teacher__teacher=user,
-            status=LearnerTeacherRequest.ACCEPTED,
-        ).exists():
-            return None
-        results_queryset = results_queryset.filter(
-            subject__teacher__teacher=user,
-            subject__school_class=student.school_class,
-        )
-    results = list(results_queryset.select_related(
-        'subject', 'academic_period', 'student__academic_period'
-    ).order_by('subject__name'))
+    results = list(_report_card_results(
+        user, student, academic_period).select_related(
+            'subject', 'academic_period', 'student__academic_period'
+        ).order_by('subject__name'))
     if not results:
         return None
 
@@ -1191,16 +1545,54 @@ def _report_card_pdf(
     )
 
 
+def _report_card_results(user, student, academic_period):
+    results_queryset = StudentResult.objects.filter(
+        student=student,
+    ).filter(
+        Q(academic_period=academic_period)
+        | Q(
+            academic_period__isnull=True,
+            student__academic_period=academic_period,
+        )
+    )
+    if user.user_type == '3':
+        if not student.teacher_requests.filter(
+            teacher__teacher=user,
+            status=LearnerTeacherRequest.ACCEPTED,
+        ).exists():
+            return StudentResult.objects.none()
+        results_queryset = results_queryset.filter(
+            subject__teacher__teacher=user,
+            subject__school_class=student.school_class,
+        )
+    elif user.user_type == '2':
+        results_queryset = results_queryset.filter(
+            subject__teacher__report_card_publications__student=student,
+            subject__teacher__report_card_publications__academic_period=(
+                academic_period),
+        ).distinct()
+    return results_queryset
+
+
 def _report_data(report_type, school_class, academic_period, subject, user=None):
     students = visible_students(user) if user else Student.objects.all()
     subjects = visible_subjects(user) if user else Subject.objects.all()
     results_queryset = visible_results(user) if user else StudentResult.objects.all()
 
     if report_type == 'school_summary':
-        school_classes = ordered_school_classes().annotate(
-            learner_count=Count('student'),
-            boys=Count('student', filter=Q(student__admin__gender='M')),
-            girls=Count('student', filter=Q(student__admin__gender='F')),
+        school_classes = ordered_school_classes()
+        if user and user.user_type == '3':
+            school_classes = school_classes.filter(
+                teacher_setups__teacher__teacher=user).distinct()
+        school_classes = school_classes.annotate(
+            learner_count=Count(
+                'student', filter=Q(student__in=students)),
+            boys=Count(
+                'student',
+                filter=Q(student__admin__gender='M', student__in=students)),
+            girls=Count(
+                'student',
+                filter=Q(student__admin__gender='F', student__in=students)),
         )
         class_rows = [[
             'Learners by class',
@@ -1217,14 +1609,15 @@ def _report_data(report_type, school_class, academic_period, subject, user=None)
             ])
         if (
             not students.exists()
-            and not SchoolClass.objects.filter(
-                grade_number__isnull=False).exists()
+            and not school_classes.exists()
             and not subjects.exists()
         ):
             return 'School Summary', [], []
         teacher_rows = []
         teachers = Teacher.objects.select_related('teacher').prefetch_related(
             'class_setups__school_class', 'subjects')
+        if user and user.user_type == '3':
+            teachers = teachers.filter(teacher=user)
         for teacher in teachers:
             class_names = ', '.join(
                 str(setup.school_class)
@@ -1232,6 +1625,15 @@ def _report_data(report_type, school_class, academic_period, subject, user=None)
             subject_names = ', '.join(
                 f'{subject.name} ({subject.school_class or "Not set up"})'
                 for subject in teacher.subjects.all())
+            request_summary = (
+                f'Accepted: {teacher.learner_requests.filter(status=(
+                    LearnerTeacherRequest.ACCEPTED)).count()}'
+            )
+            if not user or user.user_type != '3':
+                request_summary += (
+                    f'; Pending: {teacher.learner_requests.filter(status=(
+                        LearnerTeacherRequest.PENDING)).count()}'
+                )
             teacher_rows.append([
                 'Teacher assignments',
                 teacher.teacher.get_full_name() or teacher.teacher.username,
@@ -1239,12 +1641,7 @@ def _report_data(report_type, school_class, academic_period, subject, user=None)
                     f'Classes: {class_names or "None"}; '
                     f'Subjects: {subject_names or "None"}'
                 ),
-                (
-                    f'Accepted: {teacher.learner_requests.filter(status=(
-                        LearnerTeacherRequest.ACCEPTED)).count()}; '
-                    f'Pending: {teacher.learner_requests.filter(status=(
-                        LearnerTeacherRequest.PENDING)).count()}'
-                ),
+                request_summary,
             ])
         unmatched_count = students.filter(teacher_requests__isnull=True).count()
         current_period = AcademicPeriod.objects.filter(
@@ -1285,17 +1682,27 @@ def _report_data(report_type, school_class, academic_period, subject, user=None)
         ], rows
 
     if report_type == 'class_list':
-        learners = students.filter(
-            school_class=school_class, academic_period=academic_period
-        ).select_related('admin').order_by('admin__last_name', 'admin__first_name')
+        learners_queryset = students.filter(
+            school_class=school_class
+        ).filter(
+            Q(academic_period=academic_period)
+            | Q(studentresult__academic_period=academic_period)
+        ).select_related('admin').distinct()
+        if not learners_queryset.exists():
+            return f'Class List - {school_class} - {academic_period}', [
+                'No.', 'Learner name', 'Gender', 'Account ID'], []
+        learners = sort_learners(
+            learners_queryset,
+            lambda learner: learner.admin,
+        )
         rows = [[
             str(index),
             f'{learner.admin.first_name} {learner.admin.last_name}',
             learner.admin.get_gender_display(),
             learner.admin.username,
         ] for index, learner in enumerate(learners, 1)]
-        boys = learners.filter(admin__gender='M').count()
-        girls = learners.filter(admin__gender='F').count()
+        boys = learners_queryset.filter(admin__gender='M').count()
+        girls = learners_queryset.filter(admin__gender='F').count()
         rows.extend([
             ['', 'Boys total', '', str(boys)],
             ['', 'Girls total', '', str(girls)],
@@ -1338,13 +1745,18 @@ def _report_data(report_type, school_class, academic_period, subject, user=None)
             f'{assessment.name} ({assessment.weight:g}%)'
             for assessment in assessments
         ]
-        accepted_learners = (
-            _accepted_learners_for_subject(user, school_class, subject)
-            if user and user.user_type == '3'
-            else students.filter(
-                school_class=school_class,
-            ).select_related('admin').order_by(
-                'admin__last_name', 'admin__first_name', 'admin__username')
+        accepted_learners_queryset = _report_result_learners(
+            user, school_class, subject)
+        if not accepted_learners_queryset.exists():
+            return (
+                f'Results Mark Sheet - {school_class} - {subject} - '
+                f'{academic_period}',
+                ['Learner name', *assessment_headers, 'Final %', 'Grade'],
+                [],
+            )
+        accepted_learners = sort_learners(
+            accepted_learners_queryset,
+            lambda learner: learner.admin,
         )
         results_by_student = {}
         for result in prepared_results:
@@ -1419,6 +1831,16 @@ def _report_data(report_type, school_class, academic_period, subject, user=None)
         )
 
     raise ValueError(f'Unsupported report type: {report_type}')
+
+
+def _report_result_learners(user, school_class, subject):
+    if user and user.user_type == '3':
+        return _accepted_learners_for_subject(user, school_class, subject)
+    students = visible_students(user) if user else Student.objects.all()
+    return students.filter(
+        school_class=school_class,
+    ).select_related('admin').order_by(
+        'admin__last_name', 'admin__first_name', 'admin__username')
 
 def _create_report_pdf(
         user, title, headers, rows, filename='school-report.pdf',
@@ -2139,7 +2561,6 @@ def _export_data(
             'format': export_format,
             'row_count': len(rows),
         },
-        ip_address=request.META.get('REMOTE_ADDR'),
     )
     return response
 
@@ -2245,7 +2666,11 @@ def _render_manage_students(request, student_form=None, open_modal=None):
             'student__created_by__teacher',
             'student__school_class',
             'student__academic_period',
-    ).order_by('last_name', 'first_name')
+    )
+    learner_accounts = sort_learners(
+        learner_accounts,
+        lambda account: account,
+    )
     for account in learner_accounts:
         account.accepted_teacher_names = list(
             account.student.teacher_requests.filter(
@@ -2260,6 +2685,7 @@ def _render_manage_students(request, student_form=None, open_modal=None):
     export_query_params.pop('export', None)
     export_query_params.pop('page', None)
     export_format = request.GET.get('export')
+    matching_count = len(learner_accounts)
     if export_format in ('pdf', 'csv'):
         rows = [[
             account.get_full_name() or account.username,
@@ -2297,6 +2723,7 @@ def _render_manage_students(request, student_form=None, open_modal=None):
         'filter_form': filter_form,
         'open_modal': open_modal,
         'search_query': search_query,
+        'matching_count': matching_count,
         'export_query_params': export_query_params.urlencode(),
         'page_title': 'Manage Learners',
     }
@@ -2305,6 +2732,51 @@ def _render_manage_students(request, student_form=None, open_modal=None):
 
 def manage_student(request):
     return _render_manage_students(request)
+
+
+@login_required
+@require_POST
+def reset_imported_learner_activation(request, student_id):
+    if request.user.user_type not in ('1', '3'):
+        return redirect(reverse('login_page'))
+    student = get_object_or_404(
+        visible_students(request.user).select_related('admin'),
+        pk=student_id,
+    )
+    account = student.admin
+    if not account.is_imported_learner:
+        messages.error(
+            request,
+            'Only imported learners can have first-sign-in status reset.',
+        )
+    elif account.password_setup_required:
+        messages.info(
+            request,
+            'This learner is already marked as not yet activated.',
+        )
+    else:
+        account.set_unusable_password()
+        account.password_setup_required = True
+        account.save(update_fields=[
+            'password', 'password_setup_required',
+        ])
+        ActivityLog.objects.create(
+            actor=request.user,
+            actor_username=request.user.get_username() or '',
+            target_user=account,
+            target_username=account.get_username() or '',
+            target_user_id_snapshot=str(account.pk),
+            action='update',
+            object_type='authentication',
+            object_id=str(account.pk),
+            description='Staff reset an imported learner first-sign-in status.',
+            changes={},
+        )
+        messages.success(
+            request,
+            'The learner must set a new password at their next sign-in.',
+        )
+    return redirect(reverse('manage_student'))
 
 
 def _render_learner_import_page(
@@ -2316,8 +2788,6 @@ def _render_learner_import_page(
 ):
     if upload_form is None:
         upload_form = LearnerImportUploadForm()
-    if options_form is None:
-        options_form = LearnerImportOptionsForm(user=request.user)
     if import_batch is None:
         import_batch = LearnerImportBatch.objects.filter(
             created_by=request.user,
@@ -2332,7 +2802,28 @@ def _render_learner_import_page(
                 status=LearnerImportBatch.COMPLETED,
                 credentials_acknowledged_at__isnull=True,
             ).first()
-    preview_rows = preview_batch.rows if preview_batch else []
+    preview_rows = (
+        sorted(
+            preview_batch.rows,
+            key=lambda row: learner_name_sort_key(
+                row['data'].get('last_name'),
+                row['data'].get('first_name'),
+                row['data'].get('account_id'),
+            ),
+        )
+        if preview_batch else []
+    )
+    if options_form is None:
+        options_form = LearnerImportOptionsForm(
+            user=request.user,
+            missing_class_count=sum(
+                not row['data'].get('class_name') for row in preview_rows
+            ),
+            imported_class_labels={
+                row['data'].get('class_name') for row in preview_rows
+                if row['data'].get('class_name')
+            },
+        )
     return render(request, 'hod_template/import_learners.html', {
         'upload_form': upload_form,
         'options_form': options_form,
@@ -2340,6 +2831,8 @@ def _render_learner_import_page(
         'preview_rows': preview_rows,
         'preview_has_errors': any(
             row['errors'] for row in preview_rows),
+        'missing_class_count': options_form.missing_class_count,
+        'class_suggestions': options_form.class_suggestions,
         'import_batch': import_batch,
         'max_rows': settings.SIMS_LEARNER_IMPORT_MAX_ROWS,
         'page_title': 'Import Learners',
@@ -2445,14 +2938,30 @@ def import_learners(request):
             messages.error(request, batch.error_message)
             return redirect(reverse('import_learners'))
 
-        options_form = LearnerImportOptionsForm(
-            request.POST, user=request.user)
         preview_rows = validate_learner_rows(batch.rows)
+        missing_class_count = sum(
+            not row['data'].get('class_name') for row in preview_rows)
+        options_form = LearnerImportOptionsForm(
+            request.POST,
+            user=request.user,
+            missing_class_count=missing_class_count,
+            imported_class_labels={
+                row['data'].get('class_name') for row in preview_rows
+                if row['data'].get('class_name')
+            },
+        )
         batch.rows = preview_rows
         batch.save(update_fields=['rows', 'updated_at'])
         if options_form.is_valid() and not any(
             row['errors'] for row in preview_rows
         ):
+            class_for_blank_rows = options_form.cleaned_data.get(
+                'class_for_blank_rows')
+            if class_for_blank_rows:
+                for row in preview_rows:
+                    if not row['data'].get('class_name'):
+                        row['data']['class_name'] = class_for_blank_rows
+                        row['data']['class'] = class_for_blank_rows
             batch.academic_period = options_form.cleaned_data[
                 'academic_period']
             batch.teacher = (
@@ -2460,7 +2969,9 @@ def import_learners(request):
                 if request.user.user_type == '3' else None
             )
             batch.status = LearnerImportBatch.PROCESSING
+            batch.rows = preview_rows
             batch.save(update_fields=[
+                'rows',
                 'academic_period',
                 'teacher',
                 'status',
@@ -2542,6 +3053,31 @@ def process_learner_import(request, token):
             'error': batch.error_message,
         })
 
+    invalid_class_row = None
+    for row in batch.rows:
+        try:
+            parsed_class = parse_class_label(
+                row.get('data', {}).get('class_name', ''))
+        except ClassLabelError:
+            parsed_class = None
+        if parsed_class is None:
+            invalid_class_row = row
+            break
+    if invalid_class_row is not None:
+        line_number = invalid_class_row.get('line')
+        batch.status = LearnerImportBatch.FAILED
+        batch.error_message = (
+            f'Choose a valid class for import row {line_number}.'
+            if line_number is not None
+            else 'Choose a valid class for an import row.')
+        batch.save(update_fields=['status', 'error_message', 'updated_at'])
+        return JsonResponse({
+            'status': batch.status,
+            'recorded': batch.imported_rows,
+            'total': batch.total_rows,
+            'error': batch.error_message,
+        }, status=409)
+
     try:
         with transaction.atomic():
             batch = LearnerImportBatch.objects.select_for_update().get(
@@ -2560,15 +3096,17 @@ def process_learner_import(request, token):
                 batch.total_rows,
             )
             class_cache = {}
+            class_setup_cache = set()
             for row_index in range(first_index, end_index):
                 row = batch.rows[row_index]
                 data = row['data']
                 account_id = data['account_id']
                 user = CustomUser.objects.create_user(
                     username=account_id,
-                    password=learner_import_password(
-                        batch.token, row_index),
+                    password=None,
                     user_type='2',
+                    is_imported_learner=True,
+                    password_setup_required=True,
                     first_name=data['first_name'],
                     last_name=data['last_name'],
                     gender=data['gender'],
@@ -2580,6 +3118,12 @@ def process_learner_import(request, token):
                 if class_label not in class_cache:
                     class_cache[class_label] = school_class_from_label(
                         class_label)
+                if batch.teacher and class_label not in class_setup_cache:
+                    TeacherClassSetup.objects.get_or_create(
+                        teacher=batch.teacher,
+                        school_class=class_cache[class_label],
+                    )
+                    class_setup_cache.add(class_label)
                 student.school_class = class_cache[class_label]
                 student.academic_period = batch.academic_period
                 student.created_by = batch.teacher
@@ -2603,7 +3147,6 @@ def process_learner_import(request, token):
                     description=(
                         f'Imported {batch.total_rows} learners.'),
                     changes={'row_count': batch.total_rows},
-                    ip_address=request.META.get('REMOTE_ADDR'),
                 )
             batch.save(update_fields=[
                 'imported_rows', 'status', 'updated_at',
@@ -2686,8 +3229,8 @@ def complete_learner_import(request, token):
     ]
     accounts = CustomUser.objects.in_bulk(
         account_ids, field_name='username')
-    credentials = []
-    for row_index, row in enumerate(batch.rows):
+    imported_accounts = []
+    for row in batch.rows:
         account_id = row['data']['account_id']
         account = accounts.get(account_id)
         if account is None:
@@ -2697,11 +3240,15 @@ def complete_learner_import(request, token):
                 'administrator before importing this file again.',
             )
             return redirect(reverse('import_learners'))
-        credentials.append({
+        imported_accounts.append(account)
+    credentials = [{
             'name': account.get_full_name() or account.username,
+            'school_class': str(account.student.school_class or ''),
             'account_id': account.username,
-            'password': learner_import_password(batch.token, row_index),
-        })
+        }
+        for account in sort_learners(
+            imported_accounts, lambda imported_account: imported_account)
+    ]
 
     response = render(
         request,
@@ -2888,10 +3435,15 @@ def _result_rows_for_selection(school_class, subject, academic_period, learners)
 def _posted_assessment_rows(request, plan, starting_rows):
     submitted_ids = request.POST.getlist('assessment_ids')
     if not submitted_ids:
-        return starting_rows, ['Select a class, subject, and academic period first.']
+        return (
+            starting_rows,
+            ['Select a class, subject, and academic period first.'],
+            {},
+        )
 
     remove_id = request.POST.get('remove_assessment', '')
     errors = []
+    field_errors = {}
     rows = []
     names = set()
     for index, raw_id in enumerate(submitted_ids):
@@ -2911,45 +3463,66 @@ def _posted_assessment_rows(request, plan, starting_rows):
                 errors.append('An assessment does not belong to this setup.')
                 continue
         name = request.POST.get(f'assessment_{index}_name', '').strip()
+        name_field = f'assessment_{index}_name'
+        weight_field = f'assessment_{index}_weight'
+        maximum_field = f'assessment_{index}_maximum'
         raw_weight = request.POST.get(f'assessment_{index}_weight', '')
         raw_maximum = request.POST.get(
             f'assessment_{index}_maximum', '')
         if not name or len(name) > 100:
-            errors.append('Assessment names must contain 1 to 100 characters.')
+            field_errors[name_field] = (
+                'Assessment names must contain 1 to 100 characters.')
             continue
         if name.casefold() == 'previous total (test + exam)':
-            errors.append('That assessment name is reserved for previous records.')
+            field_errors[name_field] = (
+                'That assessment name is reserved for previous records.')
             continue
+        row_has_error = False
         try:
             weight = Decimal(raw_weight)
-            maximum = Decimal(raw_maximum)
         except (InvalidOperation, TypeError, ValueError):
-            errors.append(f'Enter valid weight and maximum mark for {name}.')
-            continue
-        if (
+            field_errors[weight_field] = (
+                f'Enter a valid weight for {name}.')
+            weight = None
+            row_has_error = True
+        if weight is not None and (
             not weight.is_finite()
             or weight.as_tuple().exponent < -2
             or not Decimal('0') <= weight <= Decimal('100')
         ):
-            errors.append(f'{name} weight must be between 0 and 100%.')
-        if (
+            field_errors[weight_field] = (
+                f'{name} weight must be between 0 and 100%.')
+            row_has_error = True
+        try:
+            maximum = Decimal(raw_maximum)
+        except (InvalidOperation, TypeError, ValueError):
+            field_errors[maximum_field] = (
+                f'Enter a valid maximum mark for {name}.')
+            maximum = None
+            row_has_error = True
+        if maximum is not None and (
             not maximum.is_finite()
             or maximum.as_tuple().exponent < -2
             or not Decimal('0') < maximum <= Decimal('99999.99')
         ):
-            errors.append(f'{name} maximum mark must be greater than zero.')
+            field_errors[maximum_field] = (
+                f'{name} maximum mark must be greater than zero.')
+            row_has_error = True
         if name.casefold() in names:
-            errors.append('Assessment names must be unique.')
+            field_errors[name_field] = (
+                'Assessment names must be unique.')
+            row_has_error = True
         names.add(name.casefold())
-        rows.append({
-            'assessment': assessment,
-            'name': name,
-            'weight': weight,
-            'maximum_mark': maximum,
-            'index': index,
-        })
+        if not row_has_error:
+            rows.append({
+                'assessment': assessment,
+                'name': name,
+                'weight': weight,
+                'maximum_mark': maximum,
+                'index': index,
+            })
 
-    if not rows:
+    if not rows and not field_errors:
         errors.append('Keep at least one assessment in the setup.')
     if remove_id:
         removal = (
@@ -2959,24 +3532,32 @@ def _posted_assessment_rows(request, plan, starting_rows):
         )
         if removal is None or removal.name.casefold() == 'examination':
             errors.append('The examination cannot be removed.')
-    return rows, errors
+    return rows, errors, field_errors
 
 
 def _posted_scores(request, rows, learners):
     values = {}
+    field_errors = {}
     errors = []
+    expected_fields = set()
+    submitted_assessment_count = len(
+        request.POST.getlist('assessment_ids'))
     for learner in learners:
+        expected_fields.update(
+            f'score_{learner.pk}_{index}'
+            for index in range(submitted_assessment_count)
+        )
         learner_values = {}
         for row in rows:
-            raw_value = request.POST.get(
-                f"score_{learner.pk}_{row['index']}", '').strip()
+            field_name = f"score_{learner.pk}_{row['index']}"
+            raw_value = request.POST.get(field_name, '').strip()
             if not raw_value:
                 learner_values[row['index']] = None
                 continue
             try:
                 score = Decimal(raw_value)
             except (InvalidOperation, TypeError, ValueError):
-                errors.append(
+                field_errors[field_name] = (
                     f'Enter a valid mark for {learner.admin.get_full_name()} '
                     f'in {row["name"]}.')
                 continue
@@ -2985,13 +3566,20 @@ def _posted_scores(request, rows, learners):
                 or score < 0
                 or score > row['maximum_mark']
             ):
-                errors.append(
+                field_errors[field_name] = (
                     f'{row["name"]} marks must be between 0 and '
                     f'{row["maximum_mark"]}.')
                 continue
             learner_values[row['index']] = score
         values[learner.pk] = learner_values
-    return values, errors
+    if any(
+        field_name.startswith('score_') and field_name not in expected_fields
+        for field_name in request.POST
+    ):
+        errors.append(
+            'Marks can only be saved for learners and assessments in this '
+            'selection.')
+    return values, field_errors, errors
 
 
 def _remove_assessment_scores(plan, assessment_id):
@@ -3031,33 +3619,47 @@ def manage_student_results(request):
 
     plan = None
     assessment_rows = []
+    initial_assessment_rows = []
     learners = []
     learner_rows = []
-    search_query = request.GET.get('search', '').strip()
+    assessment_field_errors = {}
+    mark_field_errors = {}
     if selected_class and selected_subject and selected_period:
         plan, assessment_rows = _initial_assessment_rows(
             selected_class, selected_subject, selected_period)
-        learners = list(_accepted_learners_for_subject(
-            request.user, selected_class, selected_subject))
-        if search_query:
-            learners = [
-                learner for learner in learners
-                if any(
-                    search_query.casefold() in value.casefold()
-                    for value in (
-                        learner.admin.first_name,
-                        learner.admin.last_name,
-                        learner.admin.username or '',
-                    )
-                )
-            ]
+        for row in assessment_rows:
+            row['original_name'] = row['name']
+            row['original_weight'] = row['weight']
+            row['original_maximum_mark'] = row['maximum_mark']
+        initial_assessment_rows = [
+            dict(row) for row in assessment_rows
+        ]
+        learners = sort_learners(
+            _accepted_learners_for_subject(
+                request.user, selected_class, selected_subject),
+            lambda learner: learner.admin,
+        )
         existing_results = _result_rows_for_selection(
             selected_class, selected_subject, selected_period, learners)
         if request.method == 'POST':
             submitted_ids = request.POST.getlist('assessment_ids')
             if submitted_ids:
-                assessment_rows = [
-                    {
+                initial_rows_by_id = {
+                    str(row['pk']): row
+                    for row in initial_assessment_rows
+                    if row.get('pk')
+                }
+                submitted_rows = []
+                for index, raw_id in enumerate(submitted_ids):
+                    original = initial_rows_by_id.get(raw_id)
+                    if (
+                        original is None
+                        and not raw_id
+                        and index < len(initial_assessment_rows)
+                    ):
+                        original = initial_assessment_rows[index]
+                    original = original or {}
+                    submitted_rows.append({
                         'pk': raw_id,
                         'name': request.POST.get(
                             f'assessment_{index}_name', ''),
@@ -3066,9 +3668,12 @@ def manage_student_results(request):
                         'maximum_mark': request.POST.get(
                             f'assessment_{index}_maximum', ''),
                         'index': index,
-                    }
-                    for index, raw_id in enumerate(submitted_ids)
-                ]
+                        'original_name': original.get('name', ''),
+                        'original_weight': original.get('weight', ''),
+                        'original_maximum_mark': original.get(
+                            'maximum_mark', ''),
+                    })
+                assessment_rows = submitted_rows
         for learner in learners:
             result = existing_results.get(learner.pk)
             if result:
@@ -3076,16 +3681,20 @@ def manage_student_results(request):
             score_cells = []
             for row in assessment_rows:
                 raw_id = str(row.get('pk') or '')
-                value = (
+                original_value = (
                     (result.assessment_scores or {}).get(raw_id)
                     if result and raw_id else None
                 )
+                value = original_value
                 if request.method == 'POST':
                     value = request.POST.get(
                         f"score_{learner.pk}_{row['index']}", '')
                 score_cells.append({
                     'assessment': row,
                     'value': value if value is not None else '',
+                    'original_value': (
+                        original_value if original_value is not None else ''),
+                    'field_name': f"score_{learner.pk}_{row['index']}",
                 })
             learner_rows.append({
                 'student': learner,
@@ -3113,21 +3722,27 @@ def manage_student_results(request):
         elif action not in ('save', 'add_test', 'remove_assessment'):
             messages.error(request, 'Choose a valid results action.')
         else:
-            posted_rows, errors = _posted_assessment_rows(
-                request, plan, assessment_rows)
+            posted_rows, errors, assessment_field_errors = (
+                _posted_assessment_rows(request, plan, assessment_rows)
+            )
             remove_id = request.POST.get('remove_assessment', '')
             if (
                 action == 'remove_assessment'
                 and len(posted_rows) < 1
             ):
                 errors.append('Keep at least one assessment in the setup.')
-            scores, score_errors = _posted_scores(
+            scores, mark_field_errors, score_errors = _posted_scores(
                 request, posted_rows, learners)
             errors.extend(score_errors)
-            if errors:
+            if errors or assessment_field_errors or mark_field_errors:
                 for error in errors:
                     messages.error(request, error)
             else:
+                saved_mark_count = sum(
+                    value is not None
+                    for learner_scores in scores.values()
+                    for value in learner_scores.values()
+                )
                 with transaction.atomic():
                     if plan is None:
                         plan = AssessmentPlan.objects.create(
@@ -3240,7 +3855,10 @@ def manage_student_results(request):
                             if action == 'add_test'
                             else 'Assessment removed and its marks deleted.'
                             if action == 'remove_assessment'
-                            else 'Assessment settings and learner marks saved.'
+                            else (
+                                f'Saved {saved_mark_count} marks and '
+                                'assessment settings.'
+                            )
                         ),
                     )
                     query = (
@@ -3250,6 +3868,17 @@ def manage_student_results(request):
                     )
                     return redirect(
                         reverse('manage_student_results') + query)
+
+    for row in assessment_rows:
+        row['name_error'] = assessment_field_errors.get(
+            f'assessment_{row["index"]}_name', '')
+        row['weight_error'] = assessment_field_errors.get(
+            f'assessment_{row["index"]}_weight', '')
+        row['maximum_error'] = assessment_field_errors.get(
+            f'assessment_{row["index"]}_maximum', '')
+    for learner_row in learner_rows:
+        for cell in learner_row['score_cells']:
+            cell['error'] = mark_field_errors.get(cell['field_name'], '')
 
     display_weight_total = Decimal('0')
     for row in assessment_rows:
@@ -3274,7 +3903,6 @@ def manage_student_results(request):
         'assessment_rows': assessment_rows,
         'learner_rows': learner_rows,
         'assessment_total': display_weight_total,
-        'search_query': search_query,
         'grading_scale': [
             {
                 'symbol': grade['symbol'],
@@ -3355,16 +3983,31 @@ def view_student_leave(request):
 
 def admin_view_profile(request):
     custom_user = request.user
+    security_question_post = (
+        request.method == 'POST'
+        and request.POST.get('action') == 'security_question'
+    )
     form = ProfileUpdateForm(
-        request.POST or None,
+        None if security_question_post else request.POST or None,
         request.FILES or None,
         user=custom_user,
     )
+    security_form, security_saved = security_question_profile_form(
+        request, custom_user)
     context = {'form': form,
                'page_title': 'My Profile',
                'custom_user': custom_user,
+               'security_question_form': security_form,
+               'security_question_missing': not bool(
+                   custom_user.security_question),
                }
-    if request.method == 'POST' and form.is_valid():
+    if security_saved:
+        return redirect(reverse('admin_view_profile'))
+    if (
+        request.method == 'POST'
+        and not security_question_post
+        and form.is_valid()
+    ):
         new_password, issued_pin = update_profile_from_form(
             custom_user, form)
         if new_password:
@@ -3384,7 +4027,10 @@ def admin_view_profile(request):
 
 
 def admin_notify_student(request):
-    student = CustomUser.objects.filter(user_type=2)
+    student = sort_learners(
+        CustomUser.objects.filter(user_type=2),
+        lambda account: account,
+    )
     context = {
         'page_title': "Send Notifications To Learners",
         'students': student
@@ -3403,7 +4049,10 @@ def send_student_notification(request):
     if not message:
         return HttpResponse('False', status=400)
     if student_id == 'all':
-        students = Student.objects.select_related('admin').order_by('pk')
+        students = sort_learners(
+            Student.objects.select_related('admin'),
+            lambda learner: learner.admin,
+        )
     else:
         students = Student.objects.filter(
             admin_id=student_id).select_related('admin')

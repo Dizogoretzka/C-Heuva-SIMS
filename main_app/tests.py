@@ -262,7 +262,7 @@ class RecycleBinTests(TestCase):
                     RecycleBinEntry.objects.filter(pk=entry.pk).exists())
 
 
-class SessionInactivityTests(TestCase):
+class SessionIdleTimeoutTests(TestCase):
     def setUp(self):
         self.learner = CustomUser.objects.create_user(
             username='session-timeout-learner',
@@ -272,12 +272,18 @@ class SessionInactivityTests(TestCase):
         )
         self.client.force_login(self.learner)
 
-    def test_authenticated_requests_refresh_a_five_minute_idle_session(self):
+    def test_idle_timeout_setting_defaults_to_one_hour(self):
+        from django.conf import settings
+
+        self.assertEqual(settings.SIMS_IDLE_TIMEOUT_SECONDS, 3600)
+        self.assertFalse(hasattr(
+            settings, 'SIMS_INACTIVITY_TIMEOUT_SECONDS'))
+
+    def test_authenticated_requests_refresh_the_session_cookie(self):
         from django.conf import settings
 
         self.assertEqual(settings.SESSION_COOKIE_AGE, 86400)
         self.assertTrue(settings.SESSION_SAVE_EVERY_REQUEST)
-        self.assertEqual(settings.SIMS_INACTIVITY_TIMEOUT_SECONDS, 300)
 
         self.client.get(reverse('student_home'))
         session_key = self.client.cookies[settings.SESSION_COOKIE_NAME].value
@@ -294,7 +300,7 @@ class SessionInactivityTests(TestCase):
             86400,
         )
 
-    def test_expired_session_is_logged_out_on_the_next_request(self):
+    def test_expired_django_session_record_still_requires_sign_in(self):
         from django.conf import settings
 
         self.client.get(reverse('student_home'))
@@ -311,22 +317,92 @@ class SessionInactivityTests(TestCase):
         )
         self.assertNotIn('_auth_user_id', self.client.session)
 
-    def test_five_minutes_of_inactivity_preserves_saved_data_and_shows_message(self):
+    @override_settings(SIMS_IDLE_TIMEOUT_SECONDS=300)
+    def test_server_refuses_requests_after_the_configured_idle_limit(self):
         self.client.get(reverse('student_home'))
         session = self.client.session
         session['sims_last_activity'] = (
-            timezone.now() - timedelta(minutes=5, seconds=1)
+            timezone.now() - timedelta(seconds=301)
         ).timestamp()
         session.save()
 
-        response = self.client.get(
-            reverse('student_home'),
-            follow=True,
-        )
+        response = self.client.get(reverse('student_home'), follow=True)
 
-        self.assertContains(response, 'inactive for 5 minutes')
+        self.assertContains(
+            response,
+            'You were signed out after 1 hour of inactivity.',
+        )
+        self.assertNotContains(response, 'inactive for 5 minutes')
         self.assertNotIn('_auth_user_id', self.client.session)
         self.assertTrue(CustomUser.objects.filter(pk=self.learner.pk).exists())
+        self.assertTrue(ActivityLog.objects.filter(
+            action='sign_out',
+            target_user=self.learner,
+            description='Signed out after inactivity.',
+        ).exists())
+
+    @override_settings(SIMS_IDLE_TIMEOUT_SECONDS=600)
+    def test_keepalive_refreshes_the_server_timestamp_without_page_loader(self):
+        self.client.get(reverse('student_home'))
+        session = self.client.session
+        session['sims_last_activity'] = (
+            timezone.now() - timedelta(seconds=60)
+        ).timestamp()
+        session.save()
+
+        response = self.client.get(reverse('session_keepalive'))
+
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b'')
+        self.assertEqual(response['Cache-Control'], 'no-store')
+        self.assertNotIn(b'page-loader', response.content)
+        self.assertGreater(
+            float(self.client.session['sims_last_activity']),
+            session['sims_last_activity'],
+        )
+
+    def test_timer_is_shown_for_all_roles_but_not_on_sign_in_pages(self):
+        admin = CustomUser.objects.create_user(
+            username='session-timeout-admin',
+            password='valid-password',
+            user_type='1',
+        )
+        teacher_user = CustomUser.objects.create_user(
+            username='session-timeout-teacher',
+            password='valid-password',
+            user_type='3',
+        )
+        dashboards = (
+            (admin, 'admin_home'),
+            (teacher_user, 'teacher_home'),
+            (self.learner, 'student_home'),
+        )
+        for user, route in dashboards:
+            with self.subTest(role=user.user_type):
+                self.client.force_login(user)
+                response = self.client.get(reverse(route))
+                self.assertContains(response, 'id="sims-idle-timer"')
+                self.assertContains(response, 'role="timer"')
+                self.assertContains(response, 'aria-live="off"')
+                self.assertContains(response, '01:00:00')
+                self.assertContains(response, 'session-idle-timer.js')
+
+        self.client.logout()
+        for route in ('login_page', 'role_login'):
+            with self.subTest(route=route):
+                response = (
+                    self.client.get(reverse(route, args=['learner']))
+                    if route == 'role_login'
+                    else self.client.get(reverse(route))
+                )
+                self.assertNotContains(response, 'id="sims-idle-timer"')
+
+    @override_settings(SIMS_IDLE_TIMEOUT_SECONDS=600)
+    def test_nav_displays_the_configured_idle_timeout(self):
+        response = self.client.get(reverse('student_home'))
+
+        self.assertContains(response, 'data-timeout-seconds="600"')
+        self.assertContains(response, '00:10:00')
 
     def test_configured_timezone_is_namibia_central_africa_time(self):
         from django.conf import settings
@@ -739,14 +815,17 @@ class InterfaceSelectionTests(TestCase):
             'password': 'valid-password',
             'role': 'learner',
         }, REMOTE_ADDR='203.0.113.12')
-
         self.assertRedirects(
             response,
             reverse('student_home'),
             fetch_redirect_response=False,
         )
-        activity = LoginActivity.objects.get(student=learner.student)
-        self.assertEqual(activity.ip_address, '203.0.113.12')
+        self.assertTrue(LoginActivity.objects.filter(
+            student=learner.student).exists())
+        self.assertNotIn(
+            'ip_address',
+            {field.name for field in LoginActivity._meta.get_fields()},
+        )
         self.assertFalse(learner.pin_hash)
         self.assertTrue(learner.check_password('valid-password'))
 
@@ -861,6 +940,11 @@ class InterfaceSelectionTests(TestCase):
             academic_period=academic_period,
             test=20,
             exam=70)
+        ReportCardPublication.objects.create(
+            teacher=teacher.teacher,
+            student=learner.student,
+            academic_period=academic_period,
+        )
         self.client.force_login(learner)
 
         response = self.client.get(reverse('student_home'))
@@ -1334,8 +1418,7 @@ class InterfaceSelectionTests(TestCase):
         school_class = SchoolClass.objects.create(grade_number=7)
         learner.student.school_class = school_class
         learner.student.save()
-        LoginActivity.objects.create(
-            student=learner.student, ip_address='203.0.113.7')
+        LoginActivity.objects.create(student=learner.student)
         self.client.force_login(admin)
 
         response = self.client.get(reverse('learner_login_activity'))
@@ -1727,7 +1810,6 @@ class TeacherRoleTests(TestCase):
         )
         admin_forbidden = (
             'manage_student_results',
-            'generate_report_card',
         )
         self.client.force_login(self.admin)
         for page in admin_forbidden:
@@ -1736,9 +1818,10 @@ class TeacherRoleTests(TestCase):
                 self.assertRedirects(
                     response, reverse('admin_home'),
                     fetch_redirect_response=False)
+        self.assertEqual(
+            self.client.get(reverse('generate_report_card')).status_code, 200)
 
         teacher_forbidden = (
-            'manage_teachers',
             'add_teacher',
             'view_student_leave',
             'student_feedback_message',
@@ -1754,11 +1837,15 @@ class TeacherRoleTests(TestCase):
                 self.assertRedirects(
                     response, reverse('teacher_home'),
                     fetch_redirect_response=False)
+        teacher_list = self.client.get(reverse('manage_teachers'))
+        self.assertEqual(teacher_list.status_code, 200)
+        self.assertContains(teacher_list, self.teacher.username)
+        self.assertNotContains(teacher_list, self.admin.username)
         response = self.client.post(reverse('generate_report'), {
             'report_type': 'school_summary',
         })
         self.assertEqual(response.status_code, 200)
-        self.assertNotEqual(response.get('Content-Type'), 'application/pdf')
+        self.assertTrue(response.content.startswith(b'%PDF'))
 
         self.client.force_login(learner)
         for page in (
@@ -2093,6 +2180,11 @@ class TeacherRoleTests(TestCase):
             f'&academic_period={academic_period.pk}',
             fetch_redirect_response=False,
         )
+        ReportCardPublication.objects.create(
+            teacher=teacher.teacher,
+            student=learner.student,
+            academic_period=academic_period,
+        )
 
         self.client.force_login(learner)
         response = self.client.get(reverse('student_view_result'))
@@ -2223,6 +2315,326 @@ class TeacherRoleTests(TestCase):
             fetch_redirect_response=False,
         )
         self.assertNotIn('_auth_user_id', self.client.session)
+
+
+class ReportExportMatrixTests(TestCase):
+    def setUp(self):
+        self.admin = CustomUser.objects.create_user(
+            username='stage1-report-admin',
+            password='valid-password',
+            user_type='1',
+            gender='F',
+            first_name='Stage',
+            last_name='Administrator',
+        )
+        self.teacher = CustomUser.objects.create_user(
+            username='stage1-report-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='F',
+            first_name='Stage',
+            last_name='Teacher',
+        )
+        self.other_teacher = CustomUser.objects.create_user(
+            username='stage1-other-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='M',
+            first_name='Other',
+            last_name='Teacher',
+        )
+        self.school_class = SchoolClass.objects.create(
+            grade_number=8, class_letter='m')
+        self.academic_period = AcademicPeriod.objects.create(
+            year=2026, term=3, is_current=True)
+        TeacherClassSetup.objects.create(
+            teacher=self.teacher.teacher,
+            school_class=self.school_class,
+        )
+        TeacherClassSetup.objects.create(
+            teacher=self.other_teacher.teacher,
+            school_class=self.school_class,
+        )
+        self.subject = Subject.objects.create(
+            name='Stage Mathematics',
+            school_class=self.school_class,
+            teacher=self.teacher.teacher,
+        )
+        self.other_subject = Subject.objects.create(
+            name='Stage Science',
+            school_class=self.school_class,
+            teacher=self.other_teacher.teacher,
+        )
+        self.assessment_plan = AssessmentPlan.objects.create(
+            school_class=self.school_class,
+            subject=self.subject,
+            academic_period=self.academic_period,
+        )
+        self.assessments = [
+            Assessment.objects.create(
+                plan=self.assessment_plan,
+                name=name,
+                weight=50,
+                maximum_mark=100,
+                position=position,
+            )
+            for position, name in enumerate(('Stage Test', 'Stage Exam'))
+        ]
+        self.other_assessment_plan = AssessmentPlan.objects.create(
+            school_class=self.school_class,
+            subject=self.other_subject,
+            academic_period=self.academic_period,
+        )
+        self.other_assessment = Assessment.objects.create(
+            plan=self.other_assessment_plan,
+            name='Science Exam',
+            weight=100,
+            maximum_mark=100,
+        )
+        self.learner = self._learner(
+            'stage1-accepted-learner', 'Alice', 'Report')
+        LearnerTeacherRequest.objects.create(
+            student=self.learner.student,
+            teacher=self.teacher.teacher,
+            school_class=self.school_class,
+            status=LearnerTeacherRequest.ACCEPTED,
+        )
+        self.unaccepted_learner = self._learner(
+            'stage1-unaccepted-learner', 'Zara', 'Unaccepted')
+        StudentResult.objects.create(
+            student=self.learner.student,
+            subject=self.subject,
+            created_by=self.teacher.teacher,
+            academic_period=self.academic_period,
+            assessment_scores={
+                str(self.assessments[0].pk): '45',
+                str(self.assessments[1].pk): '55',
+            },
+        )
+        StudentResult.objects.create(
+            student=self.learner.student,
+            subject=self.other_subject,
+            created_by=self.other_teacher.teacher,
+            academic_period=self.academic_period,
+            assessment_scores={str(self.other_assessment.pk): '60'},
+        )
+        StudentResult.objects.create(
+            student=self.unaccepted_learner.student,
+            subject=self.subject,
+            created_by=self.teacher.teacher,
+            academic_period=self.academic_period,
+            assessment_scores={
+                str(self.assessments[0].pk): '70',
+                str(self.assessments[1].pk): '30',
+            },
+        )
+
+    def _learner(self, username, first_name, last_name):
+        user = CustomUser.objects.create_user(
+            username=username,
+            password='valid-password',
+            user_type='2',
+            gender='F',
+            first_name=first_name,
+            last_name=last_name,
+        )
+        user.student.school_class = self.school_class
+        user.student.academic_period = self.academic_period
+        user.student.save()
+        return user
+
+    def _export(self, client, report, export_format):
+        if report in ('school_summary', 'class_list', 'learner_results'):
+            data = {'report_type': report}
+            if report != 'school_summary':
+                data.update({
+                    'school_class': self.school_class.pk,
+                    'academic_period': self.academic_period.pk,
+                })
+            if report == 'learner_results':
+                data['subject'] = self.subject.pk
+            data['export_format'] = export_format
+            return client.post(reverse('generate_report'), data)
+        if report == 'learner_report_card':
+            return client.post(reverse('generate_report_card'), {
+                'student': self.learner.student.pk,
+                'academic_period': self.academic_period.pk,
+                'export_format': export_format,
+            })
+        url_name = {
+            'assignments': 'manage_assignments',
+            'learner_list': 'manage_student',
+            'teacher_list': 'manage_teachers',
+        }[report]
+        return client.get(reverse(url_name), {'export': export_format})
+
+    def test_every_staff_report_exports_data_as_pdf_and_csv(self):
+        expected_content = {
+            'learner_report_card': 'Stage Mathematics',
+            'class_list': self.learner.username,
+            'learner_results': 'Alice',
+            'school_summary': 'Stage Teacher',
+            'assignments': 'Stage Teacher',
+            'learner_list': self.learner.username,
+            'teacher_list': self.teacher.username,
+        }
+        reports = tuple(expected_content)
+        for user in (self.admin, self.teacher):
+            self.client.force_login(user)
+            for report in reports:
+                for export_format in ('pdf', 'csv'):
+                    with self.subTest(
+                        role=user.user_type,
+                        report=report,
+                        export_format=export_format,
+                    ):
+                        response = self._export(
+                            self.client, report, export_format)
+                        self.assertEqual(response.status_code, 200)
+                        if export_format == 'pdf':
+                            self.assertEqual(
+                                response['Content-Type'], 'application/pdf')
+                            self.assertTrue(
+                                response.content.startswith(b'%PDF'))
+                        else:
+                            self.assertEqual(
+                                response['Content-Type'],
+                                'text/csv; charset=utf-8')
+                            content = response.content.decode('utf-8-sig')
+                            self.assertIn(
+                                expected_content[report], content)
+                            if report == 'learner_results':
+                                self.assertIn('45', content)
+                                self.assertIn('55', content)
+                                if user == self.teacher:
+                                    self.assertNotIn('Zara', content)
+                                else:
+                                    self.assertIn('Zara', content)
+                            if user == self.teacher:
+                                self.assertNotIn(
+                                    self.unaccepted_learner.username, content)
+                                self.assertNotIn(
+                                    'Stage Science', content)
+                                self.assertNotIn(
+                                    self.other_teacher.username, content)
+                            else:
+                                if report in ('class_list', 'learner_list'):
+                                    self.assertIn(
+                                        self.unaccepted_learner.username,
+                                        content,
+                                    )
+                                if report == 'learner_report_card':
+                                    self.assertIn('Stage Science', content)
+                                if report in (
+                                    'school_summary',
+                                    'assignments', 'teacher_list',
+                                ):
+                                    self.assertIn(
+                                        'Other Teacher', content)
+
+    def test_report_previews_use_the_same_staff_scope_as_exports(self):
+        for user, expected_learners, expected_subjects in (
+            (self.admin, 2, 2),
+            (self.teacher, 1, 1),
+        ):
+            self.client.force_login(user)
+            summary = self.client.get(reverse('report_preview'), {
+                'report_type': 'school_summary',
+            }).json()
+            self.assertEqual(summary['learner_count'], expected_learners)
+            self.assertEqual(summary['subject_count'], expected_subjects)
+            self.assertIn('Term 3 2026', summary['message'])
+
+            class_list = self.client.get(reverse('report_preview'), {
+                'report_type': 'class_list',
+                'school_class': self.school_class.pk,
+                'academic_period': self.academic_period.pk,
+            }).json()
+            self.assertEqual(
+                class_list['learner_count'], expected_learners)
+
+            results = self.client.get(reverse('report_preview'), {
+                'report_type': 'learner_results',
+                'school_class': self.school_class.pk,
+                'academic_period': self.academic_period.pk,
+                'subject': self.subject.pk,
+            }).json()
+            self.assertEqual(results['learner_count'], expected_learners)
+            self.assertTrue(results['has_results'])
+
+            card = self.client.get(reverse('report_preview'), {
+                'report_type': 'learner_report_card',
+                'student': self.learner.student.pk,
+                'academic_period': self.academic_period.pk,
+            }).json()
+            self.assertEqual(
+                card['count'], 2 if user == self.admin else 1)
+
+    def test_empty_class_and_mark_sheet_do_not_export_summary_rows_as_data(self):
+        empty_class = SchoolClass.objects.create(
+            grade_number=9, class_letter='z')
+        empty_subject = Subject.objects.create(
+            name='Empty class subject',
+            school_class=empty_class,
+            teacher=self.teacher.teacher,
+        )
+        TeacherClassSetup.objects.create(
+            teacher=self.teacher.teacher,
+            school_class=empty_class,
+        )
+
+        for user, result_subject in (
+            (self.admin, empty_subject),
+            (self.teacher, empty_subject),
+        ):
+            self.client.force_login(user)
+            response = self.client.post(reverse('generate_report'), {
+                'report_type': 'learner_results',
+                'school_class': empty_class.pk,
+                'academic_period': self.academic_period.pk,
+                'subject': result_subject.pk,
+                'export_format': 'csv',
+            })
+            self.assertEqual(
+                response['Content-Type'], 'text/html; charset=utf-8')
+            self.assertContains(
+                response, 'There is no data for the selected report options.')
+
+        self.client.force_login(self.admin)
+        response = self.client.post(reverse('generate_report'), {
+            'report_type': 'class_list',
+            'school_class': empty_class.pk,
+            'academic_period': self.academic_period.pk,
+            'export_format': 'pdf',
+        })
+        self.assertEqual(response['Content-Type'], 'text/html; charset=utf-8')
+        self.assertContains(
+            response, 'There is no data for the selected report options.')
+
+    def test_class_list_includes_current_results_when_learner_period_is_unset(self):
+        learner = self._learner(
+            'stage1-period-fallback-learner', 'Period', 'Fallback')
+        learner.student.academic_period = None
+        learner.student.save(update_fields=['academic_period'])
+        StudentResult.objects.create(
+            student=learner.student,
+            subject=self.subject,
+            academic_period=self.academic_period,
+            test_1=50,
+            exam=50,
+        )
+        self.client.force_login(self.admin)
+        response = self.client.post(reverse('generate_report'), {
+            'report_type': 'class_list',
+            'school_class': self.school_class.pk,
+            'academic_period': self.academic_period.pk,
+            'export_format': 'csv',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            'stage1-period-fallback-learner',
+            response.content.decode('utf-8-sig'),
+        )
 
 
 class TeacherLearnerRequestTests(TestCase):
@@ -2445,6 +2857,38 @@ class AssessmentResultsTests(TestCase):
             ['Test 1', 'Examination'],
         )
 
+    def test_grid_search_data_includes_every_accepted_learner_and_account_id(self):
+        first = self._learner('search-alpha')
+        first.first_name = 'Alex'
+        first.last_name = 'Adams'
+        first.save()
+        second = self._learner('search-beta')
+        second.first_name = 'Morgan'
+        second.last_name = 'Baker'
+        second.save()
+        self._learner('search-pending', accepted=False)
+
+        response = self.client.get(reverse('manage_student_results'), {
+            'school_class': self.school_class.pk,
+            'subject': self.subject.pk,
+            'academic_period': self.period.pk,
+            'search': 'search-alpha',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-learner-search')
+        self.assertContains(response, 'data-unsaved-status')
+        self.assertContains(response, 'results-save-bar-top')
+        self.assertContains(response, 'results-save-bar-bottom')
+        self.assertEqual(response.content.decode().count('value="save"'), 2)
+        self.assertContains(response, 'Alex Adams')
+        self.assertContains(response, 'Morgan Baker')
+        self.assertContains(
+            response, f'data-account-id="{first.username}"')
+        self.assertContains(
+            response, f'data-account-id="{second.username}"')
+        self.assertNotContains(response, 'search-pending')
+
     def test_saving_marks_creates_result_and_calculates_final_grade(self):
         learner = self._learner('marks-learner')
         rows = [
@@ -2480,6 +2924,52 @@ class AssessmentResultsTests(TestCase):
         prepare_result(result)
         self.assertEqual(result.total_score, Decimal('90.00'))
         self.assertEqual(result.grade['symbol'], 'A*')
+
+    def test_save_shows_mark_count_and_logs_old_and_new_marks(self):
+        learner = self._learner('activity-marks-learner')
+        rows = [
+            {'pk': '', 'name': 'Test 1', 'weight': 50, 'maximum_mark': 100},
+            {'pk': '', 'name': 'Examination', 'weight': 50, 'maximum_mark': 100},
+        ]
+        self.client.post(reverse('manage_student_results'), self._payload(
+            rows, {learner.student.pk: [40, 60]},
+            school_class=self.school_class, subject=self.subject,
+            period=self.period))
+        result = StudentResult.objects.get(student=learner.student)
+        assessment_ids = list(result.assessment_scores)
+        rows = [
+            {'pk': assessment_ids[0], 'name': 'Test 1', 'weight': 50,
+             'maximum_mark': 100},
+            {'pk': assessment_ids[1], 'name': 'Examination', 'weight': 50,
+             'maximum_mark': 100},
+        ]
+
+        response = self.client.post(
+            reverse('manage_student_results'),
+            self._payload(
+                rows, {learner.student.pk: [45, 70]},
+                school_class=self.school_class, subject=self.subject,
+                period=self.period),
+            follow=True,
+        )
+
+        self.assertContains(response, 'Saved 2 marks and assessment settings.')
+        result.refresh_from_db()
+        update_log = ActivityLog.objects.filter(
+            actor=self.teacher,
+            object_type='main_app.studentresult',
+            object_id=str(result.pk),
+            action='update',
+        ).latest('created_at')
+        score_change = update_log.changes['assessment_scores']
+        self.assertEqual(
+            score_change['old'],
+            {assessment_ids[0]: '40', assessment_ids[1]: '60'},
+        )
+        self.assertEqual(
+            score_change['new'],
+            {assessment_ids[0]: '45', assessment_ids[1]: '70'},
+        )
 
     def test_adding_and_removing_an_assessment_deletes_its_saved_marks(self):
         learner = self._learner('test-column-learner')
@@ -2548,6 +3038,107 @@ class AssessmentResultsTests(TestCase):
         from .grading import prepare_result
         prepare_result(result)
         self.assertIsNone(result.total_score)
+
+    def test_invalid_mark_saves_nothing_and_keeps_all_submitted_values(self):
+        learner = self._learner('atomic-marks-learner')
+        plan = AssessmentPlan.objects.create(
+            school_class=self.school_class,
+            subject=self.subject,
+            academic_period=self.period,
+        )
+        test = Assessment.objects.create(
+            plan=plan, name='Test 1', weight=50, maximum_mark=100)
+        exam = Assessment.objects.create(
+            plan=plan, name='Examination', weight=50, maximum_mark=100)
+        result = StudentResult.objects.create(
+            student=learner.student,
+            subject=self.subject,
+            academic_period=self.period,
+            assessment_scores={str(test.pk): '30', str(exam.pk): '40'},
+        )
+        rows = [
+            {'pk': str(test.pk), 'name': 'Quiz', 'weight': 60,
+             'maximum_mark': 100},
+            {'pk': str(exam.pk), 'name': 'Examination', 'weight': 40,
+             'maximum_mark': 100},
+        ]
+
+        response = self.client.post(reverse('manage_student_results'), self._payload(
+            rows, {learner.student.pk: [101, 55]},
+            school_class=self.school_class, subject=self.subject,
+            period=self.period))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Quiz marks must be between 0 and 100.')
+        self.assertContains(response, 'data-cell-error')
+        self.assertContains(response, 'value="101"')
+        self.assertContains(response, 'value="55"')
+        self.assertContains(response, 'value="Quiz"')
+        test.refresh_from_db()
+        exam.refresh_from_db()
+        result.refresh_from_db()
+        self.assertEqual(test.name, 'Test 1')
+        self.assertEqual(test.weight, Decimal('50.00'))
+        self.assertEqual(exam.weight, Decimal('50.00'))
+        self.assertEqual(
+            result.assessment_scores,
+            {str(test.pk): '30', str(exam.pk): '40'},
+        )
+
+    def test_teacher_cannot_save_marks_for_unaccepted_learner_or_foreign_subject(
+            self):
+        unaccepted = self._learner(
+            'unaccepted-marks-learner', accepted=False)
+        rows = [
+            {'pk': '', 'name': 'Test 1', 'weight': 50, 'maximum_mark': 100},
+            {'pk': '', 'name': 'Examination', 'weight': 50, 'maximum_mark': 100},
+        ]
+        response = self.client.post(reverse('manage_student_results'), self._payload(
+            rows, {unaccepted.student.pk: [80, 90]},
+            school_class=self.school_class, subject=self.subject,
+            period=self.period))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            'Marks can only be saved for learners and assessments in this selection.',
+        )
+        self.assertFalse(StudentResult.objects.filter(
+            student=unaccepted.student).exists())
+        self.assertFalse(AssessmentPlan.objects.exists())
+
+        other_teacher = CustomUser.objects.create_user(
+            username='foreign-result-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='F',
+        )
+        foreign_subject = Subject.objects.create(
+            name='Science',
+            school_class=self.school_class,
+            teacher=other_teacher.teacher,
+        )
+        response = self.client.post(reverse('manage_student_results'), {
+            'action': 'save',
+            'school_class': self.school_class.pk,
+            'subject': foreign_subject.pk,
+            'academic_period': self.period.pk,
+            'assessment_ids': ['', ''],
+            'assessment_0_name': 'Test 1',
+            'assessment_0_weight': '50',
+            'assessment_0_maximum': '100',
+            'assessment_1_name': 'Examination',
+            'assessment_1_weight': '50',
+            'assessment_1_maximum': '100',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, 'Choose a valid class, subject, and academic period.')
+        self.assertFalse(AssessmentPlan.objects.filter(
+            subject=foreign_subject).exists())
+        self.assertFalse(StudentResult.objects.filter(
+            subject=foreign_subject).exists())
 
     def test_weights_warning_and_no_final_until_total_is_100(self):
         learner = self._learner('weight-warning-learner')
@@ -2903,6 +3494,324 @@ class AssessmentResultsTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(ReportCardPublication.objects.exists())
 
+    def test_unpublished_results_stay_hidden_until_the_teacher_publishes(self):
+        learner = self._learner('unpublished-report-card')
+        plan = AssessmentPlan.objects.create(
+            school_class=self.school_class,
+            subject=self.subject,
+            academic_period=self.period,
+        )
+        assessment = Assessment.objects.create(
+            plan=plan, name='Examination', weight=100, maximum_mark=100)
+        StudentResult.objects.create(
+            student=learner.student,
+            subject=self.subject,
+            academic_period=self.period,
+            assessment_scores={str(assessment.pk): '80'},
+        )
+
+        self.client.force_login(learner)
+        home_page = self.client.get(reverse('student_home'))
+        self.assertNotContains(home_page, reverse('student_report_card'))
+        self.assertContains(
+            home_page, 'Your report card has not been published yet.')
+        results_page = self.client.get(reverse('student_view_result'))
+        self.assertNotContains(results_page, 'Mathematics')
+        self.assertContains(
+            results_page, 'Your report card has not been published yet.')
+        blocked_card = self.client.get(
+            reverse('student_report_card'), follow=True)
+        self.assertContains(
+            blocked_card, 'Your report card has not been published yet.')
+
+        self.client.force_login(self.teacher)
+        preview = self.client.post(reverse('generate_report_card'), {
+            'student': learner.student.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview['Content-Type'], 'application/pdf')
+
+        response = self.client.post(reverse('generate_report'), {
+            'publication_action': 'publish_one',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+            'student_id': learner.student.pk,
+        })
+        self.assertRedirects(
+            response,
+            reverse('generate_report') +
+            f'?manage_publications=1&academic_period={self.period.pk}'
+            f'&school_class={self.school_class.pk}',
+            fetch_redirect_response=False,
+        )
+        self.assertTrue(ReportCardPublication.objects.filter(
+            teacher=self.teacher.teacher,
+            student=learner.student,
+            academic_period=self.period,
+        ).exists())
+
+        self.client.force_login(learner)
+        published_results = self.client.get(reverse('student_view_result'))
+        self.assertContains(published_results, 'Mathematics')
+        published_pdf = self.client.get(reverse('student_report_card'))
+        self.assertEqual(published_pdf['Content-Type'], 'application/pdf')
+
+        self.client.force_login(self.teacher)
+        response = self.client.post(reverse('generate_report'), {
+            'publication_action': 'unpublish_one',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+            'student_id': learner.student.pk,
+        })
+        self.assertRedirects(
+            response,
+            reverse('generate_report') +
+            f'?manage_publications=1&academic_period={self.period.pk}'
+            f'&school_class={self.school_class.pk}',
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(ReportCardPublication.objects.filter(
+            student=learner.student,
+            academic_period=self.period,
+        ).exists())
+        self.assertTrue(ActivityLog.objects.filter(
+            actor=self.teacher,
+            object_type='main_app.reportcardpublication',
+            action='create',
+        ).exists())
+        self.assertTrue(ActivityLog.objects.filter(
+            actor=self.teacher,
+            object_type='main_app.reportcardpublication',
+            action='delete',
+        ).exists())
+        self.client.force_login(learner)
+        unpublished_results = self.client.get(reverse('student_view_result'))
+        self.assertNotContains(unpublished_results, 'Mathematics')
+        self.assertContains(
+            unpublished_results,
+            'Your report card has not been published yet.',
+        )
+
+    def test_teacher_publish_all_affects_only_accepted_class_learners(self):
+        learners = [
+            self._learner('bulk-publish-one'),
+            self._learner('bulk-publish-two'),
+            self._learner('bulk-publish-pending', accepted=False),
+        ]
+        plan = AssessmentPlan.objects.create(
+            school_class=self.school_class,
+            subject=self.subject,
+            academic_period=self.period,
+        )
+        assessment = Assessment.objects.create(
+            plan=plan, name='Examination', weight=100, maximum_mark=100)
+        for learner in learners:
+            StudentResult.objects.create(
+                student=learner.student,
+                subject=self.subject,
+                academic_period=self.period,
+                assessment_scores={str(assessment.pk): '80'},
+            )
+
+        publication_url = reverse('generate_report')
+        response = self.client.get(publication_url, {
+            'manage_publications': '1',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertEqual(response.context['publication_publish_count'], 2)
+        self.assertEqual(len(response.context['publication_rows']), 2)
+        self.assertContains(response, 'Publish all report cards (2)')
+        self.assertContains(response, 'Unpublish all report cards (0)')
+        self.assertContains(response, 'Not published')
+
+        response = self.client.post(publication_url, {
+            'publication_action': 'publish_all',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertRedirects(
+            response,
+            publication_url +
+            f'?manage_publications=1&academic_period={self.period.pk}'
+            f'&school_class={self.school_class.pk}',
+            fetch_redirect_response=False,
+        )
+        publications = ReportCardPublication.objects.filter(
+            teacher=self.teacher.teacher,
+            academic_period=self.period,
+        )
+        self.assertEqual(publications.count(), 2)
+        self.assertFalse(publications.filter(
+            student=learners[2].student).exists())
+        self.assertEqual(ActivityLog.objects.filter(
+            actor=self.teacher,
+            object_type='main_app.reportcardpublication',
+            action='create',
+        ).count(), 2)
+
+        response = self.client.post(publication_url, {
+            'publication_action': 'unpublish_all',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertRedirects(
+            response,
+            publication_url +
+            f'?manage_publications=1&academic_period={self.period.pk}'
+            f'&school_class={self.school_class.pk}',
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(publications.exists())
+        self.assertEqual(ActivityLog.objects.filter(
+            actor=self.teacher,
+            object_type='main_app.reportcardpublication',
+            action='delete',
+        ).count(), 2)
+
+    def test_administrator_can_publish_class_or_schoolwide_for_all_teachers(self):
+        administrator = CustomUser.objects.create_user(
+            username='publication-admin',
+            password='valid-password',
+            user_type='1',
+            gender='F',
+        )
+        second_teacher = CustomUser.objects.create_user(
+            username='publication-second-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='M',
+        )
+        second_class = SchoolClass.objects.create(grade_number=9)
+        TeacherClassSetup.objects.create(
+            teacher=second_teacher.teacher,
+            school_class=second_class,
+        )
+        first_learner = self._learner('publication-class-eight')
+        second_learner = CustomUser.objects.create_user(
+            username='publication-class-nine',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        second_learner.student.school_class = second_class
+        second_learner.student.academic_period = self.period
+        second_learner.student.save()
+        accept_learner_for_teacher(
+            second_learner.student, second_teacher.teacher)
+        second_subject = Subject.objects.create(
+            name='Science',
+            school_class=second_class,
+            teacher=second_teacher.teacher,
+        )
+        for learner, subject in (
+            (first_learner, self.subject),
+            (second_learner, second_subject),
+        ):
+            plan = AssessmentPlan.objects.create(
+                school_class=learner.student.school_class,
+                subject=subject,
+                academic_period=self.period,
+            )
+            assessment = Assessment.objects.create(
+                plan=plan, name='Examination', weight=100, maximum_mark=100)
+            StudentResult.objects.create(
+                student=learner.student,
+                subject=subject,
+                academic_period=self.period,
+                assessment_scores={str(assessment.pk): '80'},
+            )
+
+        self.client.force_login(administrator)
+        publication_url = reverse('generate_report')
+        response = self.client.get(publication_url, {
+            'manage_publications': '1',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertEqual(response.context['publication_publish_count'], 1)
+        response = self.client.post(publication_url, {
+            'publication_action': 'publish_all',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertRedirects(
+            response,
+            publication_url +
+            f'?manage_publications=1&academic_period={self.period.pk}'
+            f'&school_class={self.school_class.pk}',
+            fetch_redirect_response=False,
+        )
+        self.assertTrue(ReportCardPublication.objects.filter(
+            teacher=self.teacher.teacher,
+            student=first_learner.student,
+            academic_period=self.period,
+        ).exists())
+
+        response = self.client.get(publication_url, {
+            'manage_publications': '1',
+            'academic_period': self.period.pk,
+            'school_wide': 'on',
+        })
+        self.assertEqual(response.context['publication_publish_count'], 2)
+        self.assertEqual(response.context['publication_unpublish_count'], 1)
+        self.assertContains(response, 'All classes and teachers')
+        self.assertContains(response, 'Publish all report cards (2)')
+        self.assertContains(response, 'Unpublish all report cards (1)')
+
+        response = self.client.post(publication_url, {
+            'publication_action': 'publish_all',
+            'academic_period': self.period.pk,
+            'school_wide': 'on',
+        })
+        self.assertRedirects(
+            response,
+            publication_url +
+            f'?manage_publications=1&academic_period={self.period.pk}'
+            '&school_wide=on',
+            fetch_redirect_response=False,
+        )
+        self.assertEqual(
+            ReportCardPublication.objects.filter(
+                academic_period=self.period).count(),
+            2,
+        )
+
+        response = self.client.post(publication_url, {
+            'publication_action': 'unpublish_all',
+            'school_class': second_class.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertRedirects(
+            response,
+            publication_url +
+            f'?manage_publications=1&academic_period={self.period.pk}'
+            f'&school_class={second_class.pk}',
+            fetch_redirect_response=False,
+        )
+        self.assertFalse(ReportCardPublication.objects.filter(
+            student=second_learner.student,
+            academic_period=self.period,
+        ).exists())
+        self.assertTrue(ReportCardPublication.objects.filter(
+            student=first_learner.student,
+            academic_period=self.period,
+        ).exists())
+
+        self.client.post(publication_url, {
+            'publication_action': 'unpublish_all',
+            'academic_period': self.period.pk,
+            'school_wide': 'on',
+        })
+        self.assertFalse(ReportCardPublication.objects.filter(
+            academic_period=self.period).exists())
+        self.assertTrue(ActivityLog.objects.filter(
+            actor=administrator,
+            object_type='main_app.reportcardpublication',
+            action='delete',
+        ).exists())
+
     def test_learner_report_card_contains_only_their_own_results(self):
         learner = self._learner('own-report-card')
         other_learner = self._learner('other-report-card')
@@ -2919,6 +3828,11 @@ class AssessmentResultsTests(TestCase):
             student=other_learner.student, subject=self.subject,
             academic_period=self.period,
             assessment_scores={str(assessment.pk): '90'})
+        ReportCardPublication.objects.create(
+            teacher=self.teacher.teacher,
+            student=learner.student,
+            academic_period=self.period,
+        )
         self.client.force_login(learner)
 
         with patch(
@@ -3996,9 +4910,16 @@ class CredentialResetTests(TestCase):
                 self.assertEqual(self.client.get(path).status_code, 404)
         response = self.client.get(reverse('role_login', args=['learner']))
         self.assertNotContains(response, 'password_reset')
+        for role in ('admin', 'teacher', 'learner'):
+            self.assertContains(
+                response,
+                reverse('security_reset', args=[role]),
+            )
+        self.assertContains(response, 'Forgot your password or PIN?')
         self.assertContains(
             response,
-            'Forgot your password? Ask your teacher or administrator to reset it.')
+            'If you have not set a security question, ask your teacher or administrator to reset it.',
+        )
 
     def test_operator_commands_reset_admin_credentials_without_crossing_them(self):
         from django.core.management.base import CommandError
@@ -4626,7 +5547,160 @@ class LearnerImportAndExportTests(TestCase):
             batch.refresh_from_db()
         return response
 
-    def test_csv_import_previews_then_creates_learners_with_one_time_passwords(self):
+    def test_learner_lists_dropdowns_and_reports_use_normalized_name_order(self):
+        second_teacher = CustomUser.objects.create_user(
+            username='second-export-teacher',
+            password='valid-password',
+            user_type='3',
+            gender='F',
+        )
+        TeacherClassSetup.objects.create(
+            teacher=second_teacher.teacher,
+            school_class=self.school_class,
+        )
+        learner_data = (
+            ('learner-zoe', 'Zoe', 'Élan'),
+            ('learner-amy', 'Amy', 'elan'),
+            ('learner-ben', 'Ben', 'Ábel'),
+        )
+        learner_accounts = []
+        for username, first_name, last_name in learner_data:
+            account = CustomUser.objects.create_user(
+                username=username,
+                password='valid-password',
+                user_type='2',
+                gender='F',
+                first_name=first_name,
+                last_name=last_name,
+            )
+            account.student.school_class = self.school_class
+            account.student.academic_period = self.period
+            account.student.save()
+            create_class_requests(
+                account.student,
+                accepted_teacher=self.teacher_user.teacher,
+            )
+            learner_accounts.append(account)
+
+        expected_usernames = [
+            'learner-ben', 'learner-amy', 'learner-zoe',
+        ]
+        expected_student_ids = [
+            str(account.student.pk)
+            for username in expected_usernames
+            for account in learner_accounts
+            if account.username == username
+        ]
+
+        report_card_page = self.client.get(
+            reverse('generate_report_card'))
+        student_choices = [
+            str(value)
+            for value, _label in report_card_page.context[
+                'form'].fields['student'].choices
+            if value
+        ]
+        self.assertEqual(student_choices, expected_student_ids)
+
+        learner_list = self.client.get(reverse('manage_student'))
+        self.assertEqual(
+            [account.username for account in learner_list.context['students']],
+            expected_usernames,
+        )
+        notification_list = self.client.get(
+            reverse('admin_notify_student'))
+        self.assertEqual(
+            [account.username for account in notification_list.context['students']],
+            expected_usernames,
+        )
+        assignment_list = self.client.get(reverse('assignment_learners'), {
+            'teacher': self.teacher_user.teacher.pk,
+            'school_class': self.school_class.pk,
+        })
+        self.assertEqual(
+            [
+                learner_request.student.admin.username
+                for learner_request in assignment_list.context['requests']
+            ],
+            expected_usernames,
+        )
+
+        self.client.force_login(second_teacher)
+        request_list = self.client.get(reverse('learner_requests'))
+        self.assertEqual(
+            [
+                learner_request.student.admin.username
+                for learner_request in request_list.context['requests']
+            ],
+            expected_usernames,
+        )
+
+        subject = Subject.objects.create(
+            name='Mathematics',
+            school_class=self.school_class,
+            teacher=self.teacher_user.teacher,
+        )
+        self.client.force_login(self.teacher_user)
+        mark_entry = self.client.get(reverse('manage_student_results'), {
+            'school_class': self.school_class.pk,
+            'subject': subject.pk,
+            'academic_period': self.period.pk,
+        })
+        self.assertEqual(
+            [
+                row['student'].admin.username
+                for row in mark_entry.context['learner_rows']
+            ],
+            expected_usernames,
+        )
+
+        self.client.force_login(self.admin)
+        class_list_csv = self.client.post(reverse('generate_report'), {
+            'report_type': 'class_list',
+            'school_class': self.school_class.pk,
+            'academic_period': self.period.pk,
+            'export_format': 'csv',
+        })
+        csv_rows = list(csv.reader(StringIO(
+            class_list_csv.content.decode('utf-8-sig'))))
+        ordered_csv_usernames = [
+            row[3] for row in csv_rows
+            if len(row) > 3 and row[3] in expected_usernames
+        ]
+        self.assertEqual(ordered_csv_usernames, expected_usernames)
+
+    def test_import_credentials_sheet_sorts_learners_by_normalized_name(self):
+        response = self._preview_csv([
+            ['Zoe', 'Élan', 'F', 'Grade 7'],
+            ['Amy', 'elan', 'F', 'Grade 7'],
+            ['Ben', 'Ábel', 'M', 'Grade 7'],
+        ])
+        self.assertEqual(
+            [
+                row['data']['last_name']
+                for row in response.context['preview_rows']
+            ],
+            ['Ábel', 'elan', 'Élan'],
+        )
+        batch = response.context['preview_batch']
+        self._confirm_import(batch)
+        batch.refresh_from_db()
+        self._finish_import(batch)
+
+        credentials_page = self.client.get(reverse(
+            'complete_learner_import',
+            kwargs={'token': batch.token},
+        ))
+
+        self.assertEqual(
+            [
+                credential['name']
+                for credential in credentials_page.context['credentials']
+            ],
+            ['Ben Ábel', 'Amy elan', 'Zoe Élan'],
+        )
+
+    def test_csv_import_previews_then_creates_learners_for_first_sign_in(self):
         response = self._preview_csv([[
             'Ada', 'Okafor', 'F', 'Grade 7',
         ]])
@@ -4649,12 +5723,19 @@ class LearnerImportAndExportTests(TestCase):
         ))
         self.assertEqual(response.status_code, 200)
         self.assertIn('no-store', response['Cache-Control'])
-        self.assertContains(response, 'until you confirm that you have saved')
+        self.assertContains(
+            response,
+            'First sign-in: enter your account ID and leave the password empty.',
+        )
         self.assertContains(response, 'NEW LEARNER CREDENTIALS')
         self.assertContains(response, 'CONFIDENTIAL: hand out, then destroy')
         self.assertContains(response, 'crest-logo.png')
+        self.assertNotContains(response, 'Temporary password')
         learner = CustomUser.objects.get(username='okafora')
         self.assertEqual(learner.user_type, '2')
+        self.assertTrue(learner.is_imported_learner)
+        self.assertTrue(learner.password_setup_required)
+        self.assertFalse(learner.has_usable_password())
         self.assertEqual(learner.student.school_class, self.school_class)
         self.assertEqual(learner.student.academic_period, self.period)
         self.assertTrue(learner.student.teacher_requests.filter(
@@ -4662,8 +5743,9 @@ class LearnerImportAndExportTests(TestCase):
             status=LearnerTeacherRequest.PENDING,
         ).exists())
         self.assertIsNone(learner.student.created_by)
-        password = response.context['credentials'][0]['password']
-        self.assertTrue(learner.check_password(password))
+        credential = response.context['credentials'][0]
+        self.assertEqual(credential['school_class'], 'Grade 7')
+        self.assertNotIn('password', credential)
         self.assertTrue(ActivityLog.objects.filter(action='import').exists())
         self.client.post(reverse(
             'complete_learner_import',
@@ -4672,6 +5754,90 @@ class LearnerImportAndExportTests(TestCase):
         batch.refresh_from_db()
         self.assertIsNotNone(batch.credentials_acknowledged_at)
         self.assertEqual(batch.rows, [])
+
+    def test_missing_class_requires_selection_before_import(self):
+        response = self._preview_csv([
+            ['Ada', 'Okafor', 'F', 'Grade 7'],
+            ['Bea', 'Bello', 'F', ''],
+        ])
+
+        self.assertEqual(response.context['missing_class_count'], 1)
+        self.assertContains(response, 'Choose a class for the 1 row')
+        batch = response.context['preview_batch']
+        response = self._confirm_import(batch)
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, LearnerImportBatch.PREVIEW)
+        self.assertContains(response, 'Choose a class for the rows without one.')
+        self.assertFalse(CustomUser.objects.filter(
+            username__in=('okafora', 'bellob')).exists())
+
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'confirm',
+            'import_token': str(batch.token),
+            'academic_period': self.period.pk,
+            'class_for_blank_rows': 'Grade 7',
+        })
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, LearnerImportBatch.PROCESSING)
+        self.assertIsNone(batch.teacher)
+        self._finish_import(batch)
+        learners = {
+            user.username: user
+            for user in CustomUser.objects.filter(
+                username__in=('okafora', 'bellob'))
+        }
+        self.assertEqual(
+            learners['okafora'].student.school_class, self.school_class)
+        self.assertEqual(
+            learners['bellob'].student.school_class, self.school_class)
+        self.assertIsNone(learners['bellob'].student.created_by)
+        self.assertTrue(learners['bellob'].student.teacher_requests.filter(
+            teacher=self.teacher_user.teacher,
+            status=LearnerTeacherRequest.PENDING,
+        ).exists())
+
+    def test_teacher_confirms_a_new_import_class_before_it_is_added(self):
+        self.client.force_login(self.teacher_user)
+        response = self._preview_csv([['Kai', 'Learner', 'M', '']])
+        batch = response.context['preview_batch']
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'confirm',
+            'import_token': str(batch.token),
+            'academic_period': self.period.pk,
+            'class_for_blank_rows': '8A',
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'will add')
+        self.assertContains(
+            response, 'Add the selected class to My Classes and Subjects')
+        self.assertEqual(
+            batch.__class__.objects.get(pk=batch.pk).status,
+            LearnerImportBatch.PREVIEW,
+        )
+        self.assertFalse(SchoolClass.objects.filter(
+            grade_number=8, class_letter='a').exists())
+        self.assertFalse(CustomUser.objects.filter(username='learnerk').exists())
+
+        response = self.client.post(reverse('import_learners'), {
+            'action': 'confirm',
+            'import_token': str(batch.token),
+            'academic_period': self.period.pk,
+            'class_for_blank_rows': '8A',
+            'confirm_new_classes': 'on',
+        })
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, LearnerImportBatch.PROCESSING)
+        self._finish_import(batch)
+        learner = CustomUser.objects.get(username='learnerk')
+        self.assertTrue(TeacherClassSetup.objects.filter(
+            teacher=self.teacher_user.teacher,
+            school_class=learner.student.school_class,
+        ).exists())
+        self.assertTrue(learner.student.teacher_requests.filter(
+            teacher=self.teacher_user.teacher,
+            status=LearnerTeacherRequest.ACCEPTED,
+        ).exists())
 
     def test_teacher_import_assigns_accounts_only_to_themselves(self):
         self.client.force_login(self.teacher_user)
@@ -4690,6 +5856,277 @@ class LearnerImportAndExportTests(TestCase):
             status=LearnerTeacherRequest.ACCEPTED,
         ).exists())
         self.assertEqual(learner.student.created_by, self.teacher_user.teacher)
+        self.assertContains(
+            self.client.get(reverse('manage_student')),
+            'Not yet activated',
+        )
+
+    def test_imported_learner_sets_password_on_first_sign_in(self):
+        response = self._preview_csv([[
+            'Mina', 'Learner', 'F', 'Grade 7',
+        ]])
+        batch = response.context['preview_batch']
+        self._confirm_import(batch)
+        batch.refresh_from_db()
+        self._finish_import(batch)
+        learner = CustomUser.objects.get(username='learnerm')
+        self.assertContains(
+            self.client.get(reverse('manage_student')),
+            'Not yet activated',
+        )
+        self.client.logout()
+
+        response = self.client.post(reverse('user_login'), {
+            'role': 'learner',
+            'account_id': learner.username,
+            'password': '',
+        }, REMOTE_ADDR='203.0.113.52')
+
+        self.assertRedirects(
+            response,
+            reverse('activate_imported_learner'),
+            fetch_redirect_response=False,
+        )
+        learner.refresh_from_db()
+        self.assertEqual(learner.failed_login_attempts, 1)
+        activation_page = self.client.get(
+            reverse('activate_imported_learner'))
+        self.assertEqual(activation_page.status_code, 200)
+        self.assertIn('no-store', activation_page['Cache-Control'])
+        self.assertContains(activation_page, 'Set your new password')
+        self.assertNotContains(activation_page, 'Invalid sign-in details')
+        self.assertNotIn(
+            activation_page.context['activation_token'],
+            activation_page.wsgi_request.path,
+        )
+
+        response = self.client.post(
+            reverse('activate_imported_learner'),
+            {
+                'activation_token': activation_page.context[
+                    'activation_token'],
+                'new_password1': 'A-Unique-Strong-Password-289!',
+                'new_password2': 'A-Unique-Strong-Password-289!',
+            },
+            REMOTE_ADDR='203.0.113.52',
+        )
+
+        self.assertRedirects(
+            response, reverse('student_home'),
+            fetch_redirect_response=False)
+        learner.refresh_from_db()
+        self.assertFalse(learner.password_setup_required)
+        self.assertTrue(learner.is_imported_learner)
+        self.assertTrue(learner.check_password(
+            'A-Unique-Strong-Password-289!'))
+        from django.conf import settings
+        self.assertEqual(
+            self.client.session.get_expiry_age(),
+            settings.SESSION_COOKIE_AGE,
+        )
+        activation_log = ActivityLog.objects.get(
+            actor=learner,
+            object_type='authentication',
+            description='Imported learner activated their account.',
+        )
+        self.assertEqual(activation_log.changes, {})
+
+    def test_activation_page_requires_a_live_server_side_token(self):
+        self.client.logout()
+        direct_response = self.client.get(
+            reverse('activate_imported_learner'))
+        self.assertRedirects(
+            direct_response,
+            reverse('role_login', args=['learner']),
+            fetch_redirect_response=False,
+        )
+
+        self.client.force_login(self.admin)
+        response = self._preview_csv([[
+            'Tia', 'Learner', 'F', 'Grade 7',
+        ]])
+        batch = response.context['preview_batch']
+        self._confirm_import(batch)
+        batch.refresh_from_db()
+        self._finish_import(batch)
+        learner = CustomUser.objects.get(username='learnert')
+        self.client.logout()
+        self.client.post(reverse('user_login'), {
+            'role': 'learner',
+            'account_id': learner.username,
+            'password': '',
+        })
+        session = self.client.session
+        activation = session['imported_learner_password_setup']
+        activation['expires_at'] = timezone.now().timestamp() - 1
+        session['imported_learner_password_setup'] = activation
+        session.save()
+
+        response = self.client.get(
+            reverse('activate_imported_learner'))
+
+        self.assertRedirects(
+            response,
+            reverse('role_login', args=['learner']),
+            fetch_redirect_response=False,
+        )
+        self.assertNotIn('imported_learner_password_setup', self.client.session)
+
+    def test_registered_learner_empty_password_is_rejected_generically(self):
+        self.client.logout()
+        learner = CustomUser.objects.create_user(
+            username='registered-empty-password',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+
+        response = self.client.post(reverse('user_login'), {
+            'role': 'learner',
+            'account_id': learner.username,
+            'password': '',
+        })
+
+        self.assertRedirects(
+            response,
+            reverse('role_login', args=['learner']),
+            fetch_redirect_response=False,
+        )
+        login_page = self.client.get(
+            reverse('role_login', args=['learner']))
+        self.assertContains(login_page, 'Invalid sign-in details')
+        self.assertFalse(learner.is_imported_learner)
+        self.assertFalse(learner.password_setup_required)
+
+    def test_password_validation_failures_count_toward_imported_login_lockout(
+            self):
+        with override_settings(SIMS_LOGIN_MAX_FAILED_ATTEMPTS=4):
+            response = self._preview_csv([[
+                'Uma', 'Learner', 'F', 'Grade 7',
+            ]])
+            batch = response.context['preview_batch']
+            self._confirm_import(batch)
+            batch.refresh_from_db()
+            self._finish_import(batch)
+            learner = CustomUser.objects.get(username='learneru')
+            self.client.logout()
+            self.client.post(reverse('user_login'), {
+                'role': 'learner',
+                'account_id': learner.username,
+                'password': '',
+            })
+            activation_page = self.client.get(
+                reverse('activate_imported_learner'))
+
+            response = self.client.post(
+                reverse('activate_imported_learner'),
+                {
+                    'activation_token': activation_page.context[
+                        'activation_token'],
+                    'new_password1': 'short',
+                    'new_password2': 'short',
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, 'too short')
+            learner.refresh_from_db()
+            self.assertEqual(learner.failed_login_attempts, 2)
+            self.assertTrue(learner.password_setup_required)
+
+    def test_imported_first_sign_in_counts_toward_per_ip_limit(self):
+        remote_address = '198.51.100.61'
+        with override_settings(SIMS_LOGIN_IP_MAX_FAILURES=1):
+            response = self._preview_csv([[
+                'Nia', 'Learner', 'F', 'Grade 7',
+            ]])
+            batch = response.context['preview_batch']
+            self._confirm_import(batch)
+            batch.refresh_from_db()
+            self._finish_import(batch)
+            learner = CustomUser.objects.get(username='learnern')
+            self.client.logout()
+
+            response = self.client.post(reverse('user_login'), {
+                'role': 'learner',
+                'account_id': learner.username,
+                'password': '',
+            }, REMOTE_ADDR=remote_address)
+            self.assertRedirects(
+                response,
+                reverse('activate_imported_learner'),
+                fetch_redirect_response=False,
+            )
+
+            response = self.client.get(
+                reverse('activate_imported_learner'),
+                REMOTE_ADDR=remote_address,
+            )
+
+        self.assertRedirects(
+            response,
+            reverse('role_login', args=['learner']),
+            fetch_redirect_response=False,
+        )
+        self.assertNotIn(
+            'imported_learner_password_setup', self.client.session)
+        learner.refresh_from_db()
+        self.assertEqual(learner.failed_login_attempts, 1)
+
+    def test_staff_can_reset_first_sign_in_only_for_imported_learners(self):
+        learner = CustomUser.objects.create_user(
+            username='activated-imported',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+            is_imported_learner=True,
+        )
+        learner.student.school_class = self.school_class
+        learner.student.save()
+        accept_learner_for_teacher(
+            learner.student, self.teacher_user.teacher)
+        manually_added = CustomUser.objects.create_user(
+            username='manual-learner',
+            password='valid-password',
+            user_type='2',
+            gender='F',
+        )
+        manually_added.student.school_class = self.school_class
+        manually_added.student.save()
+        accept_learner_for_teacher(
+            manually_added.student, self.teacher_user.teacher)
+        self.client.force_login(self.teacher_user)
+
+        learner_list = self.client.get(reverse('manage_student'))
+        self.assertContains(learner_list, 'Activated')
+        self.assertContains(learner_list, 'Reset first sign-in')
+        self.assertContains(learner_list, 'Not applicable')
+
+        response = self.client.post(reverse(
+            'reset_imported_learner_activation',
+            args=[learner.student.pk],
+        ))
+
+        self.assertRedirects(
+            response, reverse('manage_student'),
+            fetch_redirect_response=False)
+        learner.refresh_from_db()
+        self.assertTrue(learner.password_setup_required)
+        self.assertFalse(learner.has_usable_password())
+        self.assertTrue(ActivityLog.objects.filter(
+            actor=self.teacher_user,
+            target_user=learner,
+            object_type='authentication',
+            changes={},
+        ).exists())
+
+        self.client.post(reverse(
+            'reset_imported_learner_activation',
+            args=[manually_added.student.pk],
+        ))
+        manually_added.refresh_from_db()
+        self.assertTrue(manually_added.check_password('valid-password'))
+        self.assertFalse(manually_added.password_setup_required)
 
     def test_invalid_duplicate_and_class_rows_cannot_be_imported(self):
         response = self._preview_csv([
@@ -5024,6 +6461,11 @@ class LearnerImportAndExportTests(TestCase):
             })
         self.assertEqual(report_card_csv.status_code, 200)
         self.assertIn(b'Mathematics', report_card_csv.content)
+        ReportCardPublication.objects.create(
+            teacher=self.teacher_user.teacher,
+            student=learner.student,
+            academic_period=self.period,
+        )
 
         self.client.force_login(learner)
         own_card_csv = self.client.get(

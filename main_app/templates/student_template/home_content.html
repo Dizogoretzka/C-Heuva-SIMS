@@ -3,6 +3,12 @@
 {% block content %}
 <section class="content">
     <div class="container-fluid">
+        {% if security_question_missing %}
+        <div class="alert alert-info" role="status">
+            Set a security question so you can reset your own password.
+            <a href="{% url 'student_view_profile' %}">Set it in My Profile.</a>
+        </div>
+        {% endif %}
         <div class="alert alert-info" role="status">
             Teacher connection: {{ relationship_status }}
         </div>
@@ -45,6 +51,10 @@
                     <a href="{% url 'student_report_card' %}" class="small-box-footer">
                         Download report card <i class="fas fa-arrow-circle-right"></i>
                     </a>
+                    {% elif report_card_period_assigned %}
+                    <div class="small-box-footer">
+                        Your report card has not been published yet.
+                    </div>
                     {% else %}
                     <div class="small-box-footer">
                         Available after an academic period / term and results are assigned.

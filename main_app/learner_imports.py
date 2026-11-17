@@ -1,10 +1,8 @@
-import base64
 import csv
 from io import BytesIO, StringIO
 from zipfile import BadZipFile
 
 from django.conf import settings
-from django.utils.crypto import salted_hmac
 from .class_parser import (
     ClassLabelError,
     format_class_label,
@@ -20,15 +18,6 @@ LEARNER_IMPORT_CHUNK_SIZE = 10
 
 class LearnerImportError(ValueError):
     pass
-
-
-def learner_import_password(batch_token, row_index):
-    digest = salted_hmac(
-        'main_app.learner_import_password',
-        f'{batch_token}:{row_index}',
-        algorithm='sha256',
-    ).digest()
-    return base64.urlsafe_b64encode(digest).decode('ascii').rstrip('=')
 
 
 def parse_learner_upload(uploaded_file):

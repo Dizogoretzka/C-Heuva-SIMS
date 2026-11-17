@@ -1,6 +1,29 @@
 {% extends 'main_app/base.html' %}
 {% load static %}
 {% block page_title %}{{ page_title }}{% endblock page_title %}
+{% block custom_css %}
+<style>
+    .results-save-bar {
+        position: sticky;
+        z-index: 3;
+        background: #fff;
+        padding: .5rem 0;
+    }
+
+    .results-save-bar-top {
+        top: 0;
+    }
+
+    .results-save-bar-bottom {
+        bottom: 0;
+    }
+
+    .is-unsaved {
+        border-color: #dc3545;
+        box-shadow: 0 0 0 .1rem rgba(220, 53, 69, .2);
+    }
+</style>
+{% endblock custom_css %}
 {% block content %}
 <section class="content">
     <div class="container-fluid">
@@ -19,11 +42,6 @@
                         {% endfor %}
                     </div>
                     {% endfor %}
-                    <div class="form-group">
-                        <label for="result-search">Search learners</label>
-                        <input id="result-search" class="form-control" type="search"
-                               name="search" value="{{ search_query }}">
-                    </div>
                     {% if filter_form.non_field_errors %}
                     <div class="alert alert-danger">{{ filter_form.non_field_errors }}</div>
                     {% endif %}
@@ -35,7 +53,14 @@
         </div>
 
         {% if selected_class and selected_subject and selected_period %}
-        <form method="post" id="results-grid" data-results-grid>
+        <div class="card">
+            <div class="card-body">
+                <label for="learner-search">Search learners</label>
+                <input id="learner-search" class="form-control" type="search"
+                       data-learner-search autocomplete="off">
+            </div>
+        </div>
+        <form method="post" id="results-grid" data-results-grid novalidate>
             {% csrf_token %}
             <input type="hidden" name="school_class" value="{{ selected_class.pk }}">
             <input type="hidden" name="subject" value="{{ selected_subject.pk }}">
@@ -67,21 +92,34 @@
                                         <label class="sr-only" for="assessment-{{ forloop.counter0 }}-name">Assessment name</label>
                                         <input class="form-control" id="assessment-{{ forloop.counter0 }}-name"
                                                name="assessment_{{ forloop.counter0 }}_name"
-                                               value="{{ assessment.name }}" maxlength="100" required>
+                                               value="{{ assessment.name }}" maxlength="100" required
+                                               data-unsaved-input
+                                               data-original-value="{{ assessment.original_name }}">
+                                        {% if assessment.name_error %}
+                                        <div class="text-danger" data-cell-error>{{ assessment.name_error }}</div>
+                                        {% endif %}
                                     </td>
                                     <td>
                                         <label class="sr-only" for="assessment-{{ forloop.counter0 }}-weight">Weight percentage</label>
                                         <input class="form-control" id="assessment-{{ forloop.counter0 }}-weight"
                                                name="assessment_{{ forloop.counter0 }}_weight"
-                                               value="{{ assessment.weight }}" type="number" min="0" max="100"
-                                               step="0.01" data-assessment-weight required>
+                                               value="{{ assessment.weight }}" type="text"
+                                               inputmode="decimal" data-assessment-weight data-unsaved-input
+                                               data-original-value="{{ assessment.original_weight }}" required>
+                                        {% if assessment.weight_error %}
+                                        <div class="text-danger" data-cell-error>{{ assessment.weight_error }}</div>
+                                        {% endif %}
                                     </td>
                                     <td>
                                         <label class="sr-only" for="assessment-{{ forloop.counter0 }}-maximum">Maximum mark</label>
                                         <input class="form-control" id="assessment-{{ forloop.counter0 }}-maximum"
                                                name="assessment_{{ forloop.counter0 }}_maximum"
-                                               value="{{ assessment.maximum_mark }}" type="number" min="0.01"
-                                               step="0.01" data-assessment-maximum required>
+                                               value="{{ assessment.maximum_mark }}" type="text"
+                                               inputmode="decimal" data-assessment-maximum data-unsaved-input
+                                               data-original-value="{{ assessment.original_maximum_mark }}" required>
+                                        {% if assessment.maximum_error %}
+                                        <div class="text-danger" data-cell-error>{{ assessment.maximum_error }}</div>
+                                        {% endif %}
                                     </td>
                                     <td>
                                         {% if assessment.is_last_test %}
@@ -119,8 +157,18 @@
                 <div class="card-header">
                     <h3 class="card-title">Learner marks</h3>
                 </div>
-                <div class="card-body table-responsive">
+                <div class="card-body">
                     {% if learner_rows %}
+                    <p data-unsaved-status role="status" aria-live="polite" hidden>
+                        Unsaved changes
+                    </p>
+                    <div class="results-save-bar results-save-bar-top">
+                        <button class="btn btn-primary" type="submit"
+                                name="action" value="save">
+                            Save settings and marks
+                        </button>
+                    </div>
+                    <div class="table-responsive">
                     <table class="table table-bordered table-striped">
                         <thead>
                             <tr>
@@ -142,7 +190,9 @@
                         </thead>
                         <tbody>
                             {% for row in learner_rows %}
-                            <tr data-learner-row>
+                            <tr data-learner-row
+                                data-learner-name="{{ row.student.admin.get_full_name|default:row.student.admin.username }}"
+                                data-account-id="{{ row.student.admin.username }}">
                                 <th scope="row">
                                     {{ row.student.admin.get_full_name|default:row.student.admin.username }}
                                     {% if row.result.is_previous_record %}
@@ -154,12 +204,16 @@
                                     <label class="sr-only">
                                         {{ row.student.admin.get_full_name }} {{ cell.assessment.name }} mark
                                     </label>
-                                    <input class="form-control" type="number" min="0"
-                                           max="{{ cell.assessment.maximum_mark }}" step="0.01"
+                                    <input class="form-control" type="text" inputmode="decimal"
                                            name="score_{{ row.student.pk }}_{{ cell.assessment.index }}"
                                            value="{{ cell.value }}" data-mark-input
+                                           data-unsaved-input
+                                           data-original-value="{{ cell.original_value }}"
                                            data-maximum="{{ cell.assessment.maximum_mark }}"
                                            aria-label="{{ row.student.admin.get_full_name }} {{ cell.assessment.name }} mark">
+                                    {% if cell.error %}
+                                    <div class="text-danger" data-cell-error>{{ cell.error }}</div>
+                                    {% endif %}
                                 </td>
                                 {% endfor %}
                                 <td data-final-mark aria-live="polite">
@@ -181,9 +235,15 @@
                             {% endfor %}
                         </tbody>
                     </table>
+                    <p class="text-muted mb-0" data-no-learner-matches role="status" hidden>
+                        No learner matches
+                    </p>
+                    </div>
+                    <div class="results-save-bar results-save-bar-bottom">
                     <button class="btn btn-primary" type="submit" name="action" value="save">
                         Save settings and marks
                     </button>
+                    </div>
                     {% else %}
                     <p class="text-muted mb-0">No learners accepted by this subject's teacher are in this class.</p>
                     {% endif %}
@@ -198,9 +258,6 @@
             <input type="hidden" name="school_class" value="{{ selected_class.pk }}">
             <input type="hidden" name="subject" value="{{ selected_subject.pk }}">
             <input type="hidden" name="academic_period" value="{{ selected_period.pk }}">
-            {% if search_query %}
-            <input type="hidden" name="search" value="{{ search_query }}">
-            {% endif %}
             <button type="submit" class="btn btn-outline-danger">
                 <i class="fas fa-trash-alt mr-1"></i> Delete all filtered results
             </button>

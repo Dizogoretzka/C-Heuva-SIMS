@@ -29,6 +29,11 @@
         {% endfor %}
     </div>
     {% endif %}
+    {% if reset_success_message %}
+    <div class="container mt-3" role="status">
+        <div class="alert alert-success mb-2">{{ reset_success_message }}</div>
+    </div>
+    {% endif %}
 
     <main class="sims-login-shell" data-role-switcher
           data-initial-role="{{ selected_role }}">
@@ -47,19 +52,22 @@
                          data-role-info>
                         <p>Sign in as Administrator</p>
                         <p>Choose a different interface</p>
-                        <p>Forgot your password or PIN? Ask your teacher or administrator to reset it.</p>
+                        <p><a href="{% url 'security_reset' 'admin' %}">Forgot your password or PIN?</a></p>
+                        <p>If you have not set a security question, ask your teacher or administrator to reset it.</p>
                     </div>
                     <div class="sims-role-panel" data-role-panel="teacher"
                          data-role-info>
                         <p>Sign in as Teacher</p>
                         <p>Choose a different interface</p>
-                        <p>Forgot your password or PIN? Ask your teacher or administrator to reset it.</p>
+                        <p><a href="{% url 'security_reset' 'teacher' %}">Forgot your password or PIN?</a></p>
+                        <p>If you have not set a security question, ask your teacher or administrator to reset it.</p>
                     </div>
                     <div class="sims-role-panel" data-role-panel="learner"
                          data-role-info>
                         <p>Choose how you want to continue</p>
                         <p>Sign in as Learner</p>
-                        <p>Forgot your password? Ask your teacher or administrator to reset it.</p>
+                        <p><a href="{% url 'security_reset' 'learner' %}">Forgot your password or PIN?</a></p>
+                        <p>If you have not set a security question, ask your teacher or administrator to reset it.</p>
                         <p class="sims-register-link">
                             <a href="{% url 'register_learner' %}">Don't have an account? Register</a>
                         </p>
@@ -99,6 +107,11 @@
                     </fieldset>
 
                     <div class="sims-role-panel" data-role-panel="admin">
+                        {% if selected_role == 'admin' and reset_pin_once %}
+                        <div class="alert alert-warning" role="status">
+                            Your new PIN (shown once): <strong>{{ reset_pin_once }}</strong>
+                        </div>
+                        {% endif %}
                         <form action="{% url 'user_login' %}" method="post"
                               data-role-form="admin">
                             {% csrf_token %}
@@ -145,6 +158,11 @@
                     </div>
 
                     <div class="sims-role-panel" data-role-panel="teacher">
+                        {% if selected_role == 'teacher' and reset_pin_once %}
+                        <div class="alert alert-warning" role="status">
+                            Your new PIN (shown once): <strong>{{ reset_pin_once }}</strong>
+                        </div>
+                        {% endif %}
                         <form action="{% url 'user_login' %}" method="post"
                               data-role-form="teacher">
                             {% csrf_token %}
@@ -205,8 +223,11 @@
                             <div class="form-group">
                                 <label for="learner-password">Password</label>
                                 <input id="learner-password" class="form-control"
-                                       type="password" name="password" required
+                                       type="password" name="password"
                                        autocomplete="current-password">
+                                <small class="form-text text-muted">
+                                    Imported learners who have not activated their account should leave this empty.
+                                </small>
                             </div>
                             <button class="btn btn-primary sims-login-button"
                                     type="submit">Login</button>

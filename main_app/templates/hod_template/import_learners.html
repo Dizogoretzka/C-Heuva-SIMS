@@ -14,7 +14,7 @@
                 <input type="hidden" name="action" value="upload">
                 <div class="card-body">
                     <p>Upload a UTF-8 CSV or XLSX file. The file may contain up to {{ max_rows }} learner rows.</p>
-                    <p>Required columns: <code>first_name</code>, <code>last_name</code>, <code>gender</code> (M or F), and <code>class</code>. Account IDs are generated from each learner's last name and first initial. Leave class empty to keep a learner unassigned.</p>
+                    <p>Required columns: <code>first_name</code>, <code>last_name</code>, <code>gender</code> (M or F), and <code>class</code>. Account IDs are generated from each learner's last name and first initial. Rows without a class must be assigned one before import.</p>
                     <p>
                         <a href="{% url 'download_learner_import_template' %}?format=csv">CSV template</a>
                         ·
@@ -94,12 +94,32 @@
                     {% csrf_token %}
                     <input type="hidden" name="action" value="confirm">
                     <input type="hidden" name="import_token" value="{{ preview_batch.token }}">
+                    {% if missing_class_count %}
+                    <p class="text-info">
+                        Choose a class for the {{ missing_class_count }} row{{ missing_class_count|pluralize }} without one.
+                    </p>
+                    <datalist id="learner-import-class-options">
+                        {% for class_label in class_suggestions %}
+                        <option value="{{ class_label }}"></option>
+                        {% endfor %}
+                    </datalist>
+                    {% endif %}
+                    {% if options_form.new_class_confirmation_required %}
+                    <div class="alert alert-warning">
+                        This will add
+                        {{ options_form.new_class_labels|join:", " }}
+                        to My Classes and Subjects.
+                    </div>
+                    {% endif %}
                     {% for field in options_form %}
+                    {% if field.name != 'confirm_new_classes' or options_form.new_class_confirmation_required %}
                     <div class="form-group">
                         {{ field.label_tag }}
                         {{ field }}
+                        {% if field.help_text %}<small class="form-text text-muted">{{ field.help_text }}</small>{% endif %}
                         {% for error in field.errors %}<div class="text-danger">{{ error }}</div>{% endfor %}
                     </div>
+                    {% endif %}
                     {% endfor %}
                     {% if preview_has_errors %}
                     <div class="alert alert-danger">

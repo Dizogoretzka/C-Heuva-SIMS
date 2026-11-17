@@ -52,7 +52,8 @@ SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
 # the re-login message instead of appearing to vanish without explanation.
 SESSION_COOKIE_AGE = 24 * 60 * 60
 SESSION_SAVE_EVERY_REQUEST = True
-SIMS_INACTIVITY_TIMEOUT_SECONDS = 5 * 60
+SIMS_IDLE_TIMEOUT_SECONDS = int(os.environ.get(
+    'SIMS_IDLE_TIMEOUT_SECONDS', '3600'))
 
 
 # Application definition
@@ -81,7 +82,7 @@ MIDDLEWARE = [
 
     # My Middleware
     'main_app.middleware.ActivityRequestMiddleware',
-    'main_app.middleware.SessionInactivityMiddleware',
+    'main_app.middleware.SessionIdleTimeoutMiddleware',
     'main_app.middleware.LoginCheckMiddleWare',
 ]
 
@@ -101,6 +102,7 @@ TEMPLATES = [
                 'main_app.context_processors.current_academic_period',
                 'main_app.context_processors.pending_teacher_request_count',
                 'main_app.context_processors.active_sidebar_item',
+                'main_app.context_processors.idle_timeout',
             ],
         },
     },
